@@ -1,0 +1,40 @@
+# Python virtual environment
+venv/
+__pycache__/
+*.pyc
+
+# Environment files
+.env
+*.env
+
+# System files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+
+# Vosk model files (these should be downloaded separately)
+vosk-model-*/
+
+# Log files
+*.log
+
+# Installation files
+*.deb
+*_links.txt
+install_pivariety_pkgs.sh
+
+# Build files
+build/
+dist/
+*.egg-info/
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+
+# Git token file
+gittok.py 
