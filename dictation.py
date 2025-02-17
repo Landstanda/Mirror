@@ -21,6 +21,21 @@ class DictationSystem:
         self.running = True
         self.is_typing = False  # New flag to track when we're typing
         
+        # Custom word replacements
+        self.word_replacements = {
+            'github': 'GitHub',
+            'get hub': 'GitHub',
+            'get home': 'GitHub',
+            'huh': '',  # Remove 'huh' completely
+            'an l p': 'NLP',
+            'n l p': 'NLP',
+            'and lp': 'NLP',
+            'an lp': 'NLP',
+            'chat gp t': 'ChatGPT',
+            'church gp t': 'ChatGPT',
+            'chad gp t': 'ChatGPT',
+        }
+        
         # Initialize audio settings
         self.samplerate = 16000
         self.blocksize = 8000
@@ -90,6 +105,79 @@ class DictationSystem:
         if self.is_listening:
             self.audio_queue.put(bytes(indata))
     
+    def _process_text(self, text):
+        """Process recognized text with custom rules"""
+        # Basic number components
+        units = {
+            'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4,
+            'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9,
+            'ten': 10, 'eleven': 11, 'twelve': 12, 'thirteen': 13,
+            'fourteen': 14, 'fifteen': 15, 'sixteen': 16, 'seventeen': 17,
+            'eighteen': 18, 'nineteen': 19
+        }
+        
+        tens = {
+            'twenty': 20, 'thirty': 30, 'forty': 40, 'fifty': 50,
+            'sixty': 60, 'seventy': 70, 'eighty': 80, 'ninety': 90
+        }
+        
+        # Custom word replacements
+        words = text.lower().split()
+        result_words = []
+        i = 0
+        
+        while i < len(words):
+            current_word = words[i].strip('-')  # Remove any hyphens
+            
+            # Try to process as a number
+            if current_word in tens and i + 1 < len(words):
+                next_word = words[i + 1].strip('-')
+                if next_word in units:
+                    # Combine tens and units (e.g., "twenty" + "three" = 23)
+                    number = tens[current_word] + units[next_word]
+                    result_words.append(str(number))
+                    i += 2
+                    continue
+                else:
+                    # Just tens (e.g., "twenty")
+                    result_words.append(str(tens[current_word]))
+                    i += 1
+                    continue
+            elif current_word in units:
+                # Single unit or teen number
+                result_words.append(str(units[current_word]))
+                i += 1
+                continue
+            
+            # Check for three-word replacements
+            if i + 2 < len(words):
+                three_words = f"{current_word} {words[i + 1]} {words[i + 2]}"
+                if three_words in self.word_replacements:
+                    if self.word_replacements[three_words]:  # Only add if not empty
+                        result_words.append(self.word_replacements[three_words])
+                    i += 3
+                    continue
+            
+            # Check for two-word replacements
+            if i + 1 < len(words):
+                two_words = f"{current_word} {words[i + 1]}"
+                if two_words in self.word_replacements:
+                    if self.word_replacements[two_words]:  # Only add if not empty
+                        result_words.append(self.word_replacements[two_words])
+                    i += 2
+                    continue
+            
+            # Check for single word replacements
+            if current_word in self.word_replacements:
+                if self.word_replacements[current_word]:  # Only add if not empty
+                    result_words.append(self.word_replacements[current_word])
+            else:
+                # Keep original word if no replacement found
+                result_words.append(words[i])
+            i += 1
+        
+        return ' '.join(result_words)
+
     def process_audio(self):
         """Process audio from the queue"""
         while self.is_listening:
@@ -98,10 +186,11 @@ class DictationSystem:
                 if self.recognizer.AcceptWaveform(data):
                     result = json.loads(self.recognizer.Result())
                     if result["text"]:
-                        text = result["text"] + " "
-                        print(f"→ {text}")
+                        # Process the text before typing
+                        processed_text = self._process_text(result["text"]) + " "
+                        print(f"→ {processed_text}")
                         self.is_typing = True  # Set flag before typing
-                        self.keyboard.type(text)
+                        self.keyboard.type(processed_text)
                         self.is_typing = False  # Reset flag after typing
             except queue.Empty:
                 continue

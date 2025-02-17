@@ -2,6 +2,30 @@
 
 A smart mirror application for Raspberry Pi that uses the Arducam 64MP Hawkeyes camera. Features face tracking, voice commands, and automatic focus adjustment.
 
+## Core Components Overview
+
+### Primary Classes
+MirrorSystem/
+├── core/
+│   ├── camera_manager.py      # PiCamera2 management and frame capture
+│   ├── face_processor.py      # MediaPipe face detection in separate process
+│   ├── distance_sensor.py     # Async distance sensor control
+│   ├── voice_controller.py    # Async voice command processing
+│   ├── display_manager.py     # Display and zoom control
+│   └── frame_buffer.py        # Thread-safe frame buffering
+├── utils/
+│   ├── async_helpers.py       # Async utility functions
+│   ├── focus_mapper.py        # Distance-to-focus mapping
+│   └── config.py             # System configuration
+└── main.py                    # System orchestration
+
+### Data Flow Architecture
+
+Camera Feed (Thread) → Frame Buffer ←→ Face Processor (Multiprocess)
+                                   ↘ Display Manager
+Distance Sensor (Async) → Focus Control → Camera Manager
+Voice Commands (Async) → Command Queue → System Controller
+
 ## Installation Guide
 
 ### System Requirements (Install via apt):
@@ -51,7 +75,7 @@ cd ~/.vosk/models
 # Download and extract Vosk model
 wget https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
 unzip vosk-model-small-en-us-0.15.zip
-mv vosk-model-small-en-us-0.15 vosk-model-small-en-us
+mv vosk-model-small-en-us vosk-model-small-en-us
 ```
 
 ### Arducam 64MP Camera Setup:
