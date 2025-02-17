@@ -1,0 +1,331 @@
+import os
+import time
+import threading
+import queue
+import cv2
+import numpy as np
+import mediapipe as mp
+from enum import Enum
+from dataclasses import dataclass
+from typing import Tuple, List, Optional
+from picamera2 import Picamera2, Preview
+from libcamera import Transform, controls
+from collections import deque
+
+# Suppress TF logs and enable GPU
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+os.environ["MEDIAPIPE_USE_GPU"] = "true"
+os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = "/usr/lib/aarch64-linux-gnu/qt5/plugins/platforms"
+os.environ["QT_QPA_PLATFORM"] = "xcb"
+
+class ZoomLevel(Enum):
+    EYES = 1
+    LIPS = 2
+    FACE = 3
+    WIDE = 4
+
+@dataclass
+class FaceData:
+    bbox: List[float]  # [xmin, ymin, width, height]
+    landmarks: List[Tuple[float, float]]
+    confidence: float
+
+class FrameBuffer:
+    """Dedicated class for high-priority frame capture and buffering"""
+    def __init__(self, buffer_size=3):
+        self.frames = deque(maxlen=buffer_size)
+        self.lock = threading.Lock()
+
+    def add_frame(self, frame):
+        with self.lock:
+            self.frames.append(frame)
+
+    def get_latest_frame(self):
+        with self.lock:
+            return self.frames[-1].copy() if self.frames else None
+
+class CameraManager:
+    def __init__(self):
+        # Define focus range constants first
+        self.min_focus = 8.0  # Minimum focus position for makeup range
+        self.max_focus = 12.5  # Maximum focus position for makeup range
+        
+        # Initialize camera components
+        self.picam2 = Picamera2()
+        self.frame_buffer = FrameBuffer(buffer_size=2)
+        self.configure_camera()
+        self.stop_event = threading.Event()
+
+    def configure_camera(self):
+        print("Configuring camera...")
+        # Use video configuration for better performance
+        video_config = self.picam2.create_video_configuration(
+            {"size": (1100, 1100)},
+            transform=Transform(hflip=False, vflip=True),
+            buffer_count=4,
+            queue=True,
+            controls={"NoiseReductionMode": controls.draft.NoiseReductionModeEnum.Off}
+        )
+        print("Setting camera configuration...")
+        self.picam2.configure(video_config)
+        
+        # Set high priority for the camera callback
+        self.picam2.options["priority"] = 0
+        
+        print("Setting camera controls...")
+        self.picam2.set_controls({
+            "AfMode": 0,  # Manual mode
+            "AfSpeed": 1,  # Fast
+            "AfTrigger": 0,  # Stop
+            "LensPosition": (self.min_focus + self.max_focus) / 2,  # Middle of makeup range
+            "FrameDurationLimits": (16666, 16666),  # Target 60fps
+            "NoiseReductionMode": 0  # Off
+        })
+        print("Camera configuration complete")
+
+    def start(self):
+        print("Starting camera preview...")
+        try:
+            self.picam2.start_preview(Preview.QTGL, x=10, y=0, width=1100, height=1100)
+            print("Preview started successfully")
+        except Exception as e:
+            print(f"Error starting preview: {e}")
+            
+        print("Starting camera...")
+        self.picam2.pre_callback = self._camera_callback
+        self.picam2.start()
+        print("Camera started successfully")
+
+    def _camera_callback(self, request):
+        frame = request.make_array("main")
+        if frame.ndim == 3 and frame.shape[2] == 4:
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
+        self.frame_buffer.add_frame(frame)
+
+    def get_latest_frame(self):
+        return self.frame_buffer.get_latest_frame()
+
+    def stop(self):
+        self.stop_event.set()
+        self.picam2.stop()
+
+class FaceTracker:
+    def __init__(self, camera_manager: CameraManager):
+        self.camera_manager = camera_manager
+        self.mp_face_detection = mp.solutions.face_detection
+        self.face_detector = self.mp_face_detection.FaceDetection(
+            model_selection=0,
+            min_detection_confidence=0.3
+        )
+        self.current_face_data: Optional[FaceData] = None
+        self.smoothing_factor = 0.4
+        self.stop_event = threading.Event()
+
+    def start(self):
+        self.tracking_thread = threading.Thread(target=self._tracking_loop, daemon=True)
+        self.tracking_thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+        self.tracking_thread.join(timeout=1.0)
+
+    def _tracking_loop(self):
+        while not self.stop_event.is_set():
+            frame = self.camera_manager.get_latest_frame()
+            if frame is None:
+                time.sleep(0.01)
+                continue
+
+            results = self.face_detector.process(frame)
+            if results.detections:
+                detection = results.detections[0]
+                rel_box = detection.location_data.relative_bounding_box
+                landmarks = [(kp.x, kp.y) for kp in detection.location_data.relative_keypoints]
+                
+                new_face_data = FaceData(
+                    bbox=[rel_box.xmin, rel_box.ymin, rel_box.width, rel_box.height],
+                    landmarks=landmarks,
+                    confidence=detection.score[0]
+                )
+                
+                self._smooth_face_data(new_face_data)
+            
+            time.sleep(0.2)  # Reduced from 50fps to 5fps tracking rate
+
+    def _smooth_face_data(self, new_data: FaceData):
+        if self.current_face_data is None:
+            self.current_face_data = new_data
+            return
+
+        # Smooth bbox
+        for i in range(4):
+            self.current_face_data.bbox[i] = (
+                self.smoothing_factor * new_data.bbox[i] +
+                (1 - self.smoothing_factor) * self.current_face_data.bbox[i]
+            )
+
+        # Smooth landmarks
+        for i in range(len(new_data.landmarks)):
+            x = (self.smoothing_factor * new_data.landmarks[i][0] +
+                 (1 - self.smoothing_factor) * self.current_face_data.landmarks[i][0])
+            y = (self.smoothing_factor * new_data.landmarks[i][1] +
+                 (1 - self.smoothing_factor) * self.current_face_data.landmarks[i][1])
+            self.current_face_data.landmarks[i] = (x, y)
+
+class DisplayProcessor:
+    def __init__(self, camera_manager: CameraManager, face_tracker: FaceTracker):
+        self.camera_manager = camera_manager
+        self.face_tracker = face_tracker
+        self.current_zoom = ZoomLevel.FACE
+        self.stop_event = threading.Event()
+        
+        # Add tracking state variables
+        self.current_crop = None  # [x, y, size]
+        self.deadzone_factor = 0.10
+        self.size_deadzone_factor = 0.1
+        self.crop_smoothing = 0.05
+        self.size_smoothing = 0.05
+        
+        # Zoom factors for different landmarks
+        self.zoom_factors = {
+            ZoomLevel.EYES: 1.5,   # Show 40% of face height for eyes
+            ZoomLevel.LIPS: 1.7,   # Show 33% of face height for lips
+            ZoomLevel.FACE: 1.0,   # Show full face
+            ZoomLevel.WIDE: 0.6    # Show twice the face size
+        }
+
+    def start(self):
+        self.display_thread = threading.Thread(target=self._display_loop, daemon=True)
+        self.display_thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+        if hasattr(self, 'display_thread'):
+            self.display_thread.join(timeout=1.0)
+
+    def set_zoom_level(self, level: ZoomLevel):
+        self.current_zoom = level
+
+    def _get_landmark_center(self, face_data: FaceData, zoom_level: ZoomLevel) -> Tuple[float, float]:
+        landmarks = face_data.landmarks
+        if zoom_level == ZoomLevel.EYES:
+            # Average position between eyes
+            center_x = (landmarks[0][0] + landmarks[1][0]) / 2
+            center_y = (landmarks[0][1] + landmarks[1][1]) / 2
+        elif zoom_level == ZoomLevel.LIPS:
+            # Use mouth position
+            center_x = landmarks[3][0]
+            center_y = landmarks[3][1]
+        else:
+            # Face center
+            bbox = face_data.bbox
+            center_x = bbox[0] + bbox[2] / 2
+            center_y = bbox[1] + bbox[3] / 2
+        
+        return center_x, center_y
+
+    def _display_loop(self):
+        last_process_time = 0
+        process_interval = 1/60  # Target 60fps
+        
+        while not self.stop_event.is_set():
+            current_time = time.monotonic()
+            
+            if current_time - last_process_time < process_interval:
+                time.sleep(0.001)
+                continue
+                
+            frame = self.camera_manager.get_latest_frame()
+            face_data = self.face_tracker.current_face_data
+            
+            if frame is not None and face_data is not None:
+                h, w = frame.shape[:2]
+                bbox = face_data.bbox
+                
+                # Get center point based on zoom level
+                center_x, center_y = self._get_landmark_center(face_data, self.current_zoom)
+                center_x = int(center_x * w)
+                center_y = int(center_y * h)
+                
+                # Calculate crop size based on zoom level
+                zoom_factor = self.zoom_factors[self.current_zoom]
+                base_size = max(int(bbox[2] * w), int(bbox[3] * h))
+                target_size = int(base_size / zoom_factor)
+                target_x = center_x - target_size // 2
+                target_y = center_y - target_size // 2
+                
+                # Initialize current_crop if needed
+                if self.current_crop is None:
+                    self.current_crop = [target_x, target_y, target_size]
+                
+                # Apply smoothing
+                current_x, current_y, current_size = self.current_crop
+                dx = abs(target_x - current_x) / current_size
+                dy = abs(target_y - current_y) / current_size
+                dsize = abs(target_size - current_size) / current_size
+                
+                if dx > self.deadzone_factor or dy > self.deadzone_factor or dsize > self.size_deadzone_factor:
+                    new_x = int(current_x + (target_x - current_x) * self.crop_smoothing)
+                    new_y = int(current_y + (target_y - current_y) * self.crop_smoothing)
+                    new_size = int(current_size + (target_size - current_size) * self.size_smoothing)
+                    
+                    self.current_crop = [
+                        max(0, min(w - new_size, new_x)),
+                        max(0, min(h - new_size, new_y)),
+                        new_size
+                    ]
+                
+                # Extract and process crop
+                x, y, size = self.current_crop
+                x = max(0, min(w - size, x))
+                y = max(0, min(h - size, y))
+                
+                cropped = frame[y:y+size, x:x+size]
+                processed = cv2.resize(cropped, (1100, 1100))
+                
+                # Add debug info
+                cv2.putText(processed, f"Zoom: {self.current_zoom.name}", (10, 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(processed, f"Size: {size}px", (10, 60),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                
+                # Convert to RGBA for overlay
+                overlay = cv2.cvtColor(processed, cv2.COLOR_RGB2RGBA)
+                self.camera_manager.picam2.set_overlay(overlay)
+                
+            last_process_time = current_time
+
+class SmartMirror:
+    def __init__(self):
+        print("Initializing Smart Mirror...")
+        self.camera_manager = CameraManager()
+        self.face_tracker = FaceTracker(self.camera_manager)
+        self.display_processor = DisplayProcessor(self.camera_manager, self.face_tracker)
+
+    def start(self):
+        print("Starting Smart Mirror components...")
+        self.camera_manager.start()
+        self.face_tracker.start()
+        self.display_processor.start()
+        print("Smart Mirror initialization complete")
+
+    def stop(self):
+        print("Stopping Smart Mirror...")
+        self.display_processor.stop()
+        self.face_tracker.stop()
+        self.camera_manager.stop()
+
+if __name__ == "__main__":
+    print("Starting Smart Mirror application...")
+    mirror = SmartMirror()
+    try:
+        mirror.start()
+        print("Smart Mirror started successfully")
+        while True:
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        print("\nShutting down Smart Mirror...")
+        mirror.stop()
+    except Exception as e:
+        print(f"Error running Smart Mirror: {e}")
+        mirror.stop()
