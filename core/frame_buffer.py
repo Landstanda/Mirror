@@ -28,18 +28,25 @@ class FrameBuffer:
         Args:
             frame: numpy array containing the frame data
         """
-        if frame is not None:
-            with self.lock:
-                self.frames.append(frame)
-                
+        try:
+            if frame is not None:
+                with self.lock:
+                    self.frames.append(frame.copy())
+        except Exception as e:
+            print(f"ERROR adding frame to buffer: {e}")
+            
     def get_latest_frame(self) -> np.ndarray:
         """
         Get the most recent frame from the buffer
         Returns:
             Copy of the most recent frame, or None if buffer is empty
         """
-        with self.lock:
-            return self.frames[-1].copy() if self.frames else None
+        try:
+            with self.lock:
+                return self.frames[-1].copy() if self.frames else None
+        except Exception as e:
+            print(f"ERROR retrieving frame from buffer: {e}")
+            return None
             
     def clear(self):
         """Clear all frames from the buffer"""

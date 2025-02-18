@@ -58,7 +58,6 @@ class FaceProcessor:
     def start(self):
         """Start the face processing thread"""
         if not self.running:
-            print("Starting face processor...")
             self.running = True
             self.processing_thread = threading.Thread(
                 target=self._processing_loop,
@@ -68,7 +67,6 @@ class FaceProcessor:
             
     def stop(self):
         """Stop the face processing thread"""
-        print("Stopping face processor...")
         self.running = False
         if self.processing_thread:
             self.processing_thread.join(timeout=1.0)
@@ -79,37 +77,52 @@ class FaceProcessor:
             return self.current_face_data.copy() if self.current_face_data else None
             
     def process_frame(self, frame: np.ndarray) -> Optional[FaceData]:
-        """
-        Process a single frame to detect faces
-        Returns FaceData if face detected, None otherwise
-        """
+        """Process a single frame to detect faces"""
         if frame is None:
             return None
             
         # Convert to RGB for MediaPipe
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = self.face_detector.process(rgb_frame)
-        
-        if not results.detections:
+        try:
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        except Exception as e:
+            print(f"ERROR: Frame conversion failed: {e}")
             return None
             
-        # Get the first (most prominent) face
-        detection = results.detections[0]
-        rel_bbox = detection.location_data.relative_bounding_box
-        
-        # Extract face landmarks
-        landmarks = [(kp.x, kp.y) 
-                    for kp in detection.location_data.relative_keypoints]
-        
-        # Create face data
-        face_data = FaceData(
-            bbox=[rel_bbox.xmin, rel_bbox.ymin, 
-                  rel_bbox.width, rel_bbox.height],
-            landmarks=landmarks,
-            confidence=detection.score[0]
-        )
-        
-        return face_data
+        try:
+            results = self.face_detector.process(rgb_frame)
+            
+            if not results.detections:
+                return None
+                
+            # Get the first face
+            detection = results.detections[0]
+            rel_bbox = detection.location_data.relative_bounding_box
+            
+            # Extract face landmarks
+            try:
+                landmarks = [(kp.x, kp.y) 
+                            for kp in detection.location_data.relative_keypoints]
+            except Exception as e:
+                print(f"ERROR: Failed to extract landmarks: {e}")
+                return None
+            
+            # Create face data with validation
+            face_data = FaceData(
+                bbox=[
+                    max(0.0, min(1.0, rel_bbox.xmin)),
+                    max(0.0, min(1.0, rel_bbox.ymin)),
+                    max(0.0, min(1.0, rel_bbox.width)),
+                    max(0.0, min(1.0, rel_bbox.height))
+                ],
+                landmarks=landmarks,
+                confidence=detection.score[0]
+            )
+            
+            return face_data
+            
+        except Exception as e:
+            print(f"ERROR in face processing: {e}")
+            return None
         
     def _smooth_face_data(self, new_data: FaceData):
         """Apply smoothing to face tracking data"""
@@ -171,7 +184,6 @@ class CameraFaceProcessor(FaceProcessor):
         
     def _processing_loop(self):
         """Main processing loop running in separate thread"""
-        print("Starting face processing loop...")
         last_process_time = time.monotonic()
         
         while self.running:

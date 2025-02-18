@@ -37,48 +37,62 @@ class CameraManager:
             controls={"NoiseReductionMode": controls.draft.NoiseReductionModeEnum.Off}  # Reduce processing overhead
         )
         print("Setting camera configuration...")
-        self.picam2.configure(video_config)
         
-        # Set high priority for camera thread
-        self.picam2.options["priority"] = 0
-        
+        try:
+            self.picam2.configure(video_config)
+            print("Camera configuration applied")
+            
+            # Enable frame callbacks
+            self.picam2.options["enable_raw"] = True  # Enable raw frame access
+            self.picam2.options["callback_format"] = "RGB888"  # Set callback format
+            print("Camera callback options configured")
+            
+        except Exception as e:
+            print(f"ERROR configuring camera: {e}")
+            raise
+            
         print("Setting camera controls...")
         # Set additional camera controls
-        self.picam2.set_controls({
-            "AfMode": 0,          # Manual mode
-            "AfSpeed": 1,         # Fast
-            "AfTrigger": 0,       # Stop
-            "LensPosition": 10.0,  # Initial focus position
-            "FrameDurationLimits": (16666, 16666),  # Target 60fps
-            "NoiseReductionMode": 0  # Off
-        })
+        try:
+            self.picam2.set_controls({
+                "AfMode": 0,          # Manual mode
+                "AfSpeed": 1,         # Fast
+                "AfTrigger": 0,       # Stop
+                "LensPosition": 10.0,  # Initial focus position
+                "FrameDurationLimits": (16666, 16666),  # Target 60fps
+                "NoiseReductionMode": 0  # Off
+            })
+            print("Camera controls set successfully")
+        except Exception as e:
+            print(f"ERROR setting camera controls: {e}")
+            raise
+            
         print("Camera configuration complete")
         
     def start(self):
         """Start the camera and frame capture"""
         if not self.running:
             self.running = True
-            print("Starting async helper...")
             self.async_helper.start()
             
-            print("Starting camera preview...")
             try:
-                print("Starting preview...")
                 self.picam2.start_preview(Preview.QT, x=10, y=0, width=1100, height=1100)
-                print("Preview started successfully")
             except Exception as e:
                 print(f"Preview start error: {e}")
-                print("Trying fallback preview...")
                 try:
                     self.picam2.start_preview(Preview.NULL)
-                    print("Fallback preview started")
                 except Exception as e:
                     print(f"Fallback preview error: {e}")
             
-            print("Starting camera...")
+            # Register callback BEFORE starting camera
             self.picam2.pre_callback = self._camera_callback
-            self.picam2.start()
-            print("Camera started successfully")
+            self.picam2.post_callback = lambda _: None  # Silent post-callback
+            
+            try:
+                self.picam2.start()
+            except Exception as e:
+                print(f"ERROR starting camera: {e}")
+                raise
             
     def stop(self):
         """Stop the camera and frame capture"""
@@ -89,31 +103,32 @@ class CameraManager:
             
     def _process_frame(self, frame):
         """Process frame in thread pool"""
-        if frame.ndim == 3 and frame.shape[2] == 4:
-            return cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
-        return frame
+        try:
+            if frame.ndim == 3 and frame.shape[2] == 4:
+                return cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
+            return frame
+        except Exception as e:
+            print(f"ERROR in frame processing: {e}")
+            return None
             
     def _camera_callback(self, request):
         """High priority callback for frame capture"""
         if not self.running:
             return
             
-        # Get frame from camera
-        frame = request.make_array("main")
-        if frame is None:
-            return
-            
-        # Schedule frame processing with high priority
-        task_id = self.async_helper.schedule_task(
-            self._process_frame,
-            priority=0,  # Highest priority
-            frame=frame
-        )
-        
-        # Get processed frame (if available)
-        processed_frame = self.async_helper.get_result(task_id)
-        if processed_frame is not None:
-            self.frame_buffer.add_frame(processed_frame)
+        try:
+            # Get frame from camera
+            frame = request.make_array("main")
+            if frame is None:
+                return
+                
+            # Process frame directly
+            processed_frame = self._process_frame(frame)
+            if processed_frame is not None:
+                self.frame_buffer.add_frame(processed_frame)
+                
+        except Exception as e:
+            print(f"ERROR in camera callback: {e}")
             
     def get_latest_frame(self):
         """Get the most recent frame from the buffer"""
