@@ -36,43 +36,50 @@ class CameraManager:
         self.configure_camera()
         
     def configure_camera(self):
-        """Configure camera with hardware-accelerated settings"""
-        print("Configuring camera...")
-        # Create video configuration for streaming
+        """Configure camera with optimized low-latency settings"""
+        print("Configuring camera for low latency...")
+        
+        # Create video configuration optimized for low latency
         video_config = self.picam2.create_video_configuration(
             {"size": (1100, 1100)},
             transform=Transform(hflip=False, vflip=True),
-            buffer_count=4,  # Reduced for lower latency
-            queue=True,     # Enable frame queueing
-            controls={"NoiseReductionMode": controls.draft.NoiseReductionModeEnum.Off}  # Reduce processing overhead
+            buffer_count=2,  # Minimum for stable operation
+            queue=True,
+            controls={
+                "NoiseReductionMode": controls.draft.NoiseReductionModeEnum.Off,
+                "FrameRate": 60.0
+            },
+            encode="main"  # Direct sensor-to-memory path
         )
-        print("Setting camera configuration...")
         
+        print("Setting camera configuration...")
         try:
             self.picam2.configure(video_config)
             print("Camera configuration applied")
             
-            # Enable frame callbacks
-            self.picam2.options["enable_raw"] = True  # Enable raw frame access
-            self.picam2.options["callback_format"] = "RGB888"  # Set callback format
-            print("Camera callback options configured")
+            # Enable zero-copy operation where possible
+            self.picam2.options["enable_raw"] = True
+            self.picam2.options["use_dma"] = True  # Enable DMA for frame transfer
+            self.picam2.options["buffer_count"] = 2  # Ensure buffer count matches
+            self.picam2.options["callback_format"] = "RGB888"
+            print("Camera options configured")
             
         except Exception as e:
             print(f"ERROR configuring camera: {e}")
             raise
             
         print("Setting camera controls...")
-        # Set additional camera controls
         try:
+            # Set only the essential controls we know are supported
             self.picam2.set_controls({
-                "AfMode": 0,          # Manual mode
-                "AfSpeed": 1,         # Fast
-                "AfTrigger": 0,       # Stop
+                "AfMode": 0,          # Manual focus
+                "AfSpeed": 1,         # Fast AF when manual adjustment needed
                 "LensPosition": 10.0,  # Initial focus position
                 "FrameDurationLimits": (16666, 16666),  # Target 60fps
-                "NoiseReductionMode": 0  # Off
+                "NoiseReductionMode": 0  # Disable noise reduction
             })
             print("Camera controls set successfully")
+            
         except Exception as e:
             print(f"ERROR setting camera controls: {e}")
             raise
