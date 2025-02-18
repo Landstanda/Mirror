@@ -58,6 +58,7 @@ class FaceProcessor:
     def start(self):
         """Start the face processing thread"""
         if not self.running:
+            print("Starting face processor...")
             self.running = True
             self.processing_thread = threading.Thread(
                 target=self._processing_loop,
@@ -67,6 +68,7 @@ class FaceProcessor:
             
     def stop(self):
         """Stop the face processing thread"""
+        print("Stopping face processor...")
         self.running = False
         if self.processing_thread:
             self.processing_thread.join(timeout=1.0)
@@ -137,33 +139,28 @@ class FaceProcessor:
             
     def _processing_loop(self):
         """Main processing loop running in separate thread"""
+        print("Starting face processing loop...")
+        last_process_time = time.monotonic()
+        
         while self.running:
             current_time = time.monotonic()
             
-            # Limit processing rate
-            if current_time - self.last_process_time < self.min_process_interval:
-                time.sleep(0.001)  # Small sleep to prevent CPU thrashing
-                continue
-                
             # Get frame from camera
-            frame = self._get_frame_for_processing()
+            frame = self.camera_manager.get_latest_frame()
             if frame is None:
+                time.sleep(0.001)
                 continue
                 
-            # Process frame
-            face_data = self.process_frame(frame)
-            if face_data:
-                self._smooth_face_data(face_data)
-                
-            self.last_process_time = current_time
+            # Only process frame if enough time has passed (5 FPS)
+            if current_time - last_process_time >= self.min_process_interval:
+                # Process frame
+                face_data = self.process_frame(frame)
+                if face_data:
+                    self._smooth_face_data(face_data)
+                last_process_time = current_time
             
-    def _get_frame_for_processing(self) -> Optional[np.ndarray]:
-        """
-        Get a frame for processing - this method should be overridden
-        by the main application to provide frames from the camera
-        """
-        # This will be connected to the camera manager later
-        return None
+            # Small sleep to prevent CPU thrashing
+            time.sleep(0.001)
 
 class CameraFaceProcessor(FaceProcessor):
     """Face processor that connects to our CameraManager"""
@@ -172,6 +169,27 @@ class CameraFaceProcessor(FaceProcessor):
         super().__init__(min_detection_confidence)
         self.camera_manager = camera_manager
         
-    def _get_frame_for_processing(self) -> Optional[np.ndarray]:
-        """Get frame from camera manager for processing"""
-        return self.camera_manager.get_latest_frame() 
+    def _processing_loop(self):
+        """Main processing loop running in separate thread"""
+        print("Starting face processing loop...")
+        last_process_time = time.monotonic()
+        
+        while self.running:
+            current_time = time.monotonic()
+            
+            # Get frame from camera
+            frame = self.camera_manager.get_latest_frame()
+            if frame is None:
+                time.sleep(0.001)
+                continue
+                
+            # Only process frame if enough time has passed (5 FPS)
+            if current_time - last_process_time >= self.min_process_interval:
+                # Process frame
+                face_data = self.process_frame(frame)
+                if face_data:
+                    self._smooth_face_data(face_data)
+                last_process_time = current_time
+            
+            # Small sleep to prevent CPU thrashing
+            time.sleep(0.001) 

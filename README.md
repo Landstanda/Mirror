@@ -8,23 +8,203 @@ A smart mirror application for Raspberry Pi that uses the Arducam 64MP Hawkeyes 
 MirrorSystem/
 ├── core/
 │   ├── camera_manager.py      # PiCamera2 management and frame capture
-│   ├── face_processor.py      # MediaPipe face detection in separate process
+│   ├── face_processor.py      # MediaPipe face detection in separate thread
 │   ├── distance_sensor.py     # Async distance sensor control
 │   ├── voice_controller.py    # Async voice command processing
-│   ├── display_manager.py     # Display and zoom control
-│   └── frame_buffer.py        # Thread-safe frame buffering
-├── utils/
-│   ├── async_helpers.py       # Async utility functions
-│   ├── focus_mapper.py        # Distance-to-focus mapping
-│   └── config.py             # System configuration
+│   ├── display_processor.py   # Display and zoom control with smooth tracking
+│   ├── frame_buffer.py        # High-performance thread-safe frame buffering
+│   └── async_helper.py        # Async task scheduling and thread management
+├── tests/
+│   ├── test_frame_buffer.py   # Frame buffer validation
+│   ├── test_async_helper.py   # Async helper performance testing
+│   ├── test_display_processor.py # Display and tracking testing
+│   ├── test_face_processor.py # Face detection testing
+│   ├── test_voice_control.py  # Voice command testing
+│   └── test_distance_sensor.py # Distance sensor testing
 └── main.py                    # System orchestration
+
+### System Architecture
+
+#### Frame Processing Pipeline
+```
+Camera Feed (60 FPS) → Frame Buffer (3-frame ring) → Async Processing
+                                                  ↳ Face Detection (5 FPS)
+                                                  ↳ Display Processing (30 FPS)
+```
+
+#### Performance Components
+
+1. **Camera Manager** (`core/camera_manager.py`):
+   - Hardware-accelerated frame capture at 60 FPS
+   - Configurable preview modes (QTGL, QT, NULL)
+   - Manual focus control with range 8.0-12.5
+   - Async frame processing with priority scheduling
+   - Efficient frame conversion and buffering
+   - Hardware-optimized camera configuration
+   - Automatic noise reduction and frame rate control
+
+2. **Frame Buffer** (`core/frame_buffer.py`):
+   - Thread-safe ring buffer for frame storage
+   - Zero-copy frame retrieval for performance
+   - Automatic buffer size management
+   - Efficient frame access patterns
+
+3. **Async Helper** (`core/async_helper.py`):
+   - Priority-based task scheduling
+   - Thread pool for CPU-intensive tasks
+   - Non-blocking operation queues
+   - Resource cleanup and management
+
+4. **Face Processor** (`core/face_processor.py`):
+   - MediaPipe-based face detection
+   - Efficient 5 FPS processing rate
+   - Motion prediction and smoothing
+   - Thread-safe face data management
+   - Configurable detection confidence
+   - Early detection abandonment for performance
+   - Smooth landmark tracking
+
+5. **Display Processor** (`core/display_processor.py`):
+   - Smooth tracking with deadzone
+   - Multiple zoom levels (eyes, lips, face, wide)
+   - Motion prediction
+   - Efficient frame processing
+   - Configurable smoothing factors
+   - Smart frame skipping
+   - Adaptive zoom transitions
+
+6. **Distance Sensor** (`core/distance_sensor.py`):
+   - Async ultrasonic sensor control
+   - Direct focus mapping (20cm - 150cm range)
+   - 5Hz sampling rate
+   - Thread-safe distance measurements
+   - Linear focus interpolation
+   - Configurable GPIO management
+   - Automatic timeout handling
+
+7. **Voice Controller** (`core/voice_controller.py`):
+   - Vosk-based speech recognition
+   - Async command processing
+   - Configurable command mapping
+   - Thread-safe audio handling
+   - Efficient audio buffering
+   - Command queue management
+   - Resource cleanup on shutdown
+
+#### Performance Optimizations
+
+1. **Frame Rate Management**:
+   - Camera capture: 60 FPS
+   - Display processing: 30 FPS
+   - Face detection: 5 FPS
+   - Async task scheduling for optimal CPU usage
+
+2. **Thread Priority**:
+   - Camera thread: Highest priority
+   - Display processing: Medium priority
+   - Face detection: Lower priority
+   - Background tasks: Lowest priority
+
+3. **Memory Management**:
+   - Ring buffer to prevent memory growth
+   - Frame dropping under high load
+   - Efficient frame copying strategies
+   - Resource cleanup on shutdown
 
 ### Data Flow Architecture
 
-Camera Feed (Thread) → Frame Buffer ←→ Face Processor (Multiprocess)
-                                   ↘ Display Manager
-Distance Sensor (Async) → Focus Control → Camera Manager
-Voice Commands (Async) → Command Queue → System Controller
+```
+                                    ┌─────────────────┐
+                                    │  Voice Commands  │
+                                    │     (Async)     │
+                                    └────────┬────────┘
+                                             │
+┌─────────────┐    ┌──────────────┐    ┌────▼─────┐
+│Camera Feed   │──→ │Frame Buffer  │←─→ │Command   │
+│(60 FPS)     │    │(3-frame ring)│    │Queue     │
+└─────┬───────┘    └──────┬───────┘    └────┬─────┘
+      │                   │                  │
+      │             ┌─────▼──────┐     ┌────▼─────┐
+      │             │Face Process │     │System    │
+      │             │(5 FPS)      │     │Controller│
+      │             └─────┬───────┘     └────┬─────┘
+┌─────▼───────┐          │                   │
+│Distance     │          │                   │
+│Sensor (5Hz) │    ┌─────▼───────┐          │
+└─────┬───────┘    │Display      │←─────────┘
+      │            │Process(30FPS)│
+      │            └─────┬────────┘
+      │                  │
+      └──→ Focus ←───────┘
+           Control
+
+Key Data Flows:
+1. Camera → Frame Buffer:
+   - Raw frames at 60 FPS
+   - Hardware-accelerated capture
+   - Async frame processing
+
+2. Frame Buffer → Processors:
+   - Thread-safe frame distribution
+   - Zero-copy frame access
+   - Priority-based scheduling
+
+3. Face Processor → Display:
+   - Face detection results at 5 FPS
+   - Landmark coordinates
+   - Confidence scores
+   - Smoothed tracking data
+
+4. Distance Sensor → Focus:
+   - Distance measurements at 5Hz
+   - Focus mapping calculations
+   - Async focus adjustments
+
+5. Voice → Command Queue:
+   - Speech recognition results
+   - Command validation
+   - Async command processing
+
+6. System Controller:
+   - Component coordination
+   - Resource management
+   - State synchronization
+   - Error handling
+```
+
+### Performance Considerations
+
+The system is optimized for real-time performance while maintaining stability:
+
+#### Memory Management
+- Frame Buffer uses a ring buffer to prevent memory growth
+- Zero-copy frame access where possible
+- Explicit garbage collection for large objects
+- Memory-mapped file operations for configuration
+
+#### CPU Optimization
+- Hardware-accelerated video capture (V4L2)
+- Thread pool for CPU-intensive operations
+- Workload distribution across cores
+- Minimal lock contention in critical paths
+
+#### I/O Efficiency
+- Async I/O for sensor readings
+- Batched command processing
+- Buffered logging
+- Prioritized task scheduling
+
+#### Latency Control
+- Face detection rate limited to 5 FPS
+- Display updates capped at 30 FPS
+- Adaptive frame dropping under load
+- Background task throttling
+
+#### Resource Limits
+- Maximum frame buffer size: 3 frames
+- Thread pool size: CPU cores - 1
+- Command queue capacity: 100 items
+- Log rotation: 10MB per file
 
 ## Installation Guide
 
@@ -146,3 +326,49 @@ sudo reboot
      - "zoom out" - zooms out to wide view
    - Automatic focus adjustment based on face distance
    - Smooth tracking and zooming
+
+### Troubleshooting
+
+#### Video Feed Issues
+- **Jerky Video**: Check CPU usage and reduce face detection frequency if needed
+- **Delayed Feed**: Verify frame buffer size and consider reducing it
+- **Black Screen**: Ensure camera permissions and V4L2 driver is loaded
+- **Low FPS**: Monitor system temperature and check for thermal throttling
+
+#### Face Detection Problems
+- **Missed Faces**: Adjust confidence threshold in configuration
+- **Slow Tracking**: Increase face detection frequency if CPU allows
+- **False Positives**: Update MediaPipe model or adjust minimum detection size
+- **Tracking Lag**: Check face processor thread priority
+
+#### Focus Issues
+- **Hunting Focus**: Adjust focus smoothing parameters
+- **Wrong Distance**: Calibrate distance sensor offset
+- **Slow Response**: Check distance sensor sampling rate
+- **Focus Drift**: Verify focus mapping calculations
+
+#### Voice Control
+- **No Recognition**: Check microphone levels and noise threshold
+- **False Triggers**: Adjust voice activation sensitivity
+- **Missed Commands**: Update voice model with new samples
+- **Audio Delay**: Monitor audio buffer size
+
+#### System Performance
+- **High CPU**: Profile thread usage and adjust processing rates
+- **Memory Growth**: Check for frame buffer leaks
+- **Slow Startup**: Review initialization sequence
+- **Thread Blocking**: Monitor lock contention and deadlocks
+
+### Testing
+
+The system includes comprehensive test scripts for each component:
+
+```bash
+# Run individual component tests
+python test_frame_buffer.py      # Test frame buffer performance
+python test_async_helper.py      # Test async processing
+python test_display_processor.py # Test display and tracking
+python test_face_processor.py    # Test face detection
+python test_voice_control.py     # Test voice commands
+python test_distance_sensor.py   # Test distance sensor
+```
