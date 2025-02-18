@@ -5,6 +5,9 @@ import numpy as np
 import cv2
 from core.frame_buffer import FrameBuffer
 from core.async_helper import AsyncHelper
+import os
+import time
+from collections import deque
 
 class ZoomLevel(Enum):
     WIDE = 1
@@ -23,6 +26,13 @@ class CameraManager:
         self.focus_range = (8.0, 12.5)
         self.current_zoom = ZoomLevel.FACE
         self.running = False
+        
+        # Performance monitoring
+        self.frame_times = deque(maxlen=60)  # Store last 60 frame timestamps
+        self.latency_times = deque(maxlen=60)  # Store last 60 latency measurements
+        self.last_fps_print = 0
+        self.fps_print_interval = 1.0  # Print stats every second
+        
         self.configure_camera()
         
     def configure_camera(self):
@@ -117,6 +127,9 @@ class CameraManager:
             return
             
         try:
+            # Record frame arrival time
+            frame_time = time.monotonic()
+            
             # Get frame from camera
             frame = request.make_array("main")
             if frame is None:
@@ -127,8 +140,34 @@ class CameraManager:
             if processed_frame is not None:
                 self.frame_buffer.add_frame(processed_frame)
                 
+                # Calculate and store latency
+                latency = time.monotonic() - frame_time
+                self.latency_times.append(latency)
+                self.frame_times.append(frame_time)
+                
+                # Print performance stats periodically
+                current_time = time.monotonic()
+                if current_time - self.last_fps_print >= self.fps_print_interval:
+                    self._print_performance_stats()
+                    self.last_fps_print = current_time
+                
         except Exception as e:
             print(f"ERROR in camera callback: {e}")
+            
+    def _print_performance_stats(self):
+        """Calculate and print performance statistics"""
+        if len(self.frame_times) < 2:
+            return
+            
+        # Calculate FPS
+        time_diff = self.frame_times[-1] - self.frame_times[0]
+        if time_diff > 0:
+            fps = (len(self.frame_times) - 1) / time_diff
+            
+            # Calculate average latency
+            avg_latency = sum(self.latency_times) / len(self.latency_times) * 1000  # Convert to ms
+            
+            print(f"Camera Performance: {fps:.1f} FPS, Latency: {avg_latency:.1f}ms")
             
     def get_latest_frame(self):
         """Get the most recent frame from the buffer"""

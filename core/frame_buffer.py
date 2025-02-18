@@ -4,7 +4,7 @@ import numpy as np
 
 class FrameBuffer:
     """
-    Dedicated class for high-priority frame capture and buffering
+    Optimized frame buffer with minimal copying
     
     Features:
     - Thread-safe frame storage
@@ -24,29 +24,24 @@ class FrameBuffer:
         
     def add_frame(self, frame: np.ndarray):
         """
-        Add a new frame to the buffer
+        Add a new frame to the buffer without copying
         Args:
             frame: numpy array containing the frame data
         """
-        try:
-            if frame is not None:
-                with self.lock:
-                    self.frames.append(frame.copy())
-        except Exception as e:
-            print(f"ERROR adding frame to buffer: {e}")
-            
+        if frame is not None:
+            with self.lock:
+                # Only copy if we need to preserve the original frame
+                # In our case, the camera provides a new array each time
+                self.frames.append(frame)
+                
     def get_latest_frame(self) -> np.ndarray:
         """
-        Get the most recent frame from the buffer
+        Get the most recent frame from the buffer without copying
         Returns:
-            Copy of the most recent frame, or None if buffer is empty
+            Reference to the most recent frame, or None if buffer is empty
         """
-        try:
-            with self.lock:
-                return self.frames[-1].copy() if self.frames else None
-        except Exception as e:
-            print(f"ERROR retrieving frame from buffer: {e}")
-            return None
+        with self.lock:
+            return self.frames[-1] if self.frames else None
             
     def clear(self):
         """Clear all frames from the buffer"""

@@ -24,17 +24,27 @@ class DisplayProcessor:
         self.running = False
         self.thread = None
         
-        # Tracking state with improved smoothing
+        # Camera sensor constants
+        self.SENSOR_WIDTH = 9152   # Full sensor width
+        self.SENSOR_HEIGHT = 6944  # Full sensor height
+        
+        # Tracking state with spring-damper smoothing
         self.current_crop = None  # [x, y, size]
         self.target_crop = None   # [x, y, size]
-        self.deadzone_factor = 0.05  # Reduced from 0.10 for smoother tracking
+        self.velocity = [0, 0, 0]  # Velocity for x, y, and size
+        self.spring_constant = 4.0  # How quickly it moves toward target (higher = faster)
+        self.damping = 0.8  # How quickly it stabilizes (higher = more damping)
+        self.deadzone_factor = 0.05
         self.size_deadzone_factor = 0.05
-        self.position_smoothing = 0.15  # Increased for smoother movement
-        self.size_smoothing = 0.1
         
-        # Frame timing
-        self.last_process_time = 0
-        self.min_process_interval = 0.2  # 5 FPS to match face processor
+        # Separate face detection from display updates
+        self.last_face_data = None
+        self.last_face_update = 0
+        self.face_data_valid_duration = 0.5  # Consider face data valid for 500ms
+        
+        # Frame timing for display
+        self.min_display_interval = 0.016  # Target ~60 FPS for display
+        self.last_display_update = 0
         
         # Zoom factors for different landmarks
         self.zoom_factors = {
@@ -79,16 +89,81 @@ class DisplayProcessor:
             # Use nose landmark for center
             return landmarks[2]
             
-    def _process_frame(self, frame: np.ndarray) -> Optional[np.ndarray]:
-        """Process a single frame with improved tracking"""
-        if frame is None:
-            return None
+    def _convert_to_sensor_coordinates(self, x: int, y: int, size: int, frame_width: int, frame_height: int) -> Tuple[int, int, int]:
+        """Convert frame coordinates to sensor coordinates maintaining absolute square ratio"""
+        # Force square sensor region
+        sensor_dim = min(self.SENSOR_WIDTH, self.SENSOR_HEIGHT)
+        
+        # Calculate scaling based on the minimum sensor dimension to ensure square
+        frame_scale = sensor_dim / max(frame_width, frame_height)
+
+        # Scale size while maintaining square, but respect camera's max height
+        MAX_CAMERA_HEIGHT = 4320  # Camera's maximum supported height
+        sensor_size = int(size * frame_scale)
+        sensor_size = min(sensor_size, sensor_dim, MAX_CAMERA_HEIGHT)  # Ensure it fits within all constraints
+        
+        # Calculate center point and scale
+        center_x = x + (size / 2)
+        center_y = y + (size / 2)
+        
+        # Scale and center the crop in the square sensor region
+        sensor_center_x = int(center_x * frame_scale)
+        sensor_center_y = int(center_y * frame_scale)
+        
+        # Calculate final coordinates
+        sensor_x = sensor_center_x - (sensor_size // 2)
+        sensor_y = sensor_center_y - (sensor_size // 2)
+        
+        # Center in the actual sensor area (which may be non-square)
+        if self.SENSOR_WIDTH > sensor_dim:
+            # Center horizontally in the wider sensor
+            extra_width = self.SENSOR_WIDTH - sensor_dim
+            sensor_x += int(extra_width / 2)
             
-        face_data = self.face_processor.get_current_face_data()
+        if self.SENSOR_HEIGHT > sensor_dim:
+            # Center vertically in the taller sensor
+            extra_height = self.SENSOR_HEIGHT - sensor_dim
+            sensor_y += int(extra_height / 2)
+        
+        # Final bounds check
+        sensor_x = max(0, min(self.SENSOR_WIDTH - sensor_size, sensor_x))
+        sensor_y = max(0, min(self.SENSOR_HEIGHT - sensor_size, sensor_y))
+        
+        return sensor_x, sensor_y, sensor_size
+
+    def _display_loop(self):
+        """Main display loop running at full camera FPS"""
+        while self.running:
+            current_time = time.monotonic()
+            
+            # Check if it's time for a display update
+            if current_time - self.last_display_update >= self.min_display_interval:
+                frame = self.camera_manager.get_latest_frame()
+                if frame is not None:
+                    # Get latest face data if available
+                    face_data = self.face_processor.get_current_face_data()
+                    if face_data is not None:
+                        self.last_face_data = face_data
+                        self.last_face_update = current_time
+                    
+                    # Use last known face data if it's still valid
+                    if (self.last_face_data is not None and 
+                        current_time - self.last_face_update < self.face_data_valid_duration):
+                        self._update_crop_with_face(self.last_face_data)
+                    
+                    # Apply current crop to frame
+                    self._apply_current_crop(frame)
+                    self.last_display_update = current_time
+            
+            # Small sleep to prevent CPU thrashing
+            time.sleep(0.001)
+
+    def _update_crop_with_face(self, face_data):
+        """Update crop based on face detection data with spring-damper smoothing"""
         if face_data is None:
-            return frame
+            return
             
-        h, w = frame.shape[:2]
+        h, w = self.camera_manager.get_latest_frame().shape[:2]
         bbox = face_data.bbox
         
         # Get center point based on current zoom level
@@ -96,80 +171,78 @@ class DisplayProcessor:
         center_x = int(center_x * w)
         center_y = int(center_y * h)
         
-        # Calculate target crop size based on face size and zoom level
-        face_size = max(bbox[2] * w, bbox[3] * h)
-        zoom_factor = self.zoom_factors[self.current_zoom]
-        target_size = int(face_size / zoom_factor)
+        # Convert bbox percentages to pixel coordinates first
+        face_x = int(bbox[0] * w)
+        face_y = int(bbox[1] * h)
+        face_w = int(bbox[2] * w)
+        face_h = int(bbox[3] * h)
         
-        # Calculate target crop position
-        target_x = center_x - target_size // 2
-        target_y = center_y - target_size // 2
+        # Calculate crop size based on face width with dynamic zoom
+        # As face gets smaller (further away), we crop tighter
+        base_size = face_w  # Use face width as base
+        frame_diagonal = (w * w + h * h) ** 0.5  # Screen diagonal for reference
+        relative_face_size = face_w / frame_diagonal  # How big the face is relative to screen
         
-        # Initialize crops if needed
+        # Dynamic zoom factor: zoom in more when face is smaller
+        dynamic_zoom = max(1.2, 2.0 - relative_face_size * 10)  # Adjust these constants to tune behavior
+        zoom_factor = self.zoom_factors[self.current_zoom] * dynamic_zoom
+        
+        target_size = int(base_size / zoom_factor)
+        # Ensure even size
+        target_size = target_size + (target_size % 2)
+        
+        # Calculate crop position ensuring perfect square
+        target_x = int(center_x - target_size / 2)
+        target_y = int(center_y - target_size / 2)
+        
+        # Initialize crops and velocity if needed
         if self.target_crop is None:
             self.target_crop = [target_x, target_y, target_size]
+            self.velocity = [0, 0, 0]
         if self.current_crop is None:
             self.current_crop = self.target_crop.copy()
             
         # Update target crop
         self.target_crop = [target_x, target_y, target_size]
         
-        # Calculate relative movement
-        current_x, current_y, current_size = self.current_crop
-        dx = (target_x - current_x) / current_size
-        dy = (target_y - current_y) / current_size
-        dsize = abs(target_size - current_size) / current_size
-        
-        # Apply movement only if it exceeds deadzone
-        if abs(dx) > self.deadzone_factor or abs(dy) > self.deadzone_factor or dsize > self.size_deadzone_factor:
-            # Smooth position changes
-            new_x = int(current_x + (target_x - current_x) * self.position_smoothing)
-            new_y = int(current_y + (target_y - current_y) * self.position_smoothing)
-            new_size = int(current_size + (target_size - current_size) * self.size_smoothing)
+        # Apply spring-damper smoothing
+        dt = 1/5.0  # Time step (5 FPS)
+        for i in range(3):  # For x, y, and size
+            # Calculate spring force
+            displacement = self.target_crop[i] - self.current_crop[i]
+            spring_force = self.spring_constant * displacement
             
-            # Update current crop with bounds checking
-            self.current_crop = [
-                max(0, min(w - new_size, new_x)),
-                max(0, min(h - new_size, new_y)),
-                new_size
-            ]
+            # Apply damping force
+            damping_force = -self.damping * self.velocity[i]
             
-            # Update camera's ScalerCrop for hardware-accelerated cropping
-            try:
-                x, y, size = self.current_crop
-                self.camera_manager.picam2.set_controls({"ScalerCrop": (x, y, size, size)})
-            except Exception as e:
-                # Fall back to software cropping if hardware crop fails
-                pass
-                
-        # Extract crop (fallback if hardware crop fails)
-        x, y, size = self.current_crop
-        x = max(0, min(w - size, x))
-        y = max(0, min(h - size, y))
+            # Update velocity
+            self.velocity[i] += (spring_force + damping_force) * dt
+            
+            # Update position
+            self.current_crop[i] += self.velocity[i] * dt
+            
+        # Ensure integer coordinates
+        self.current_crop = [int(v) for v in self.current_crop]
         
+        # Bound check while maintaining square
+        self.current_crop[0] = max(0, min(w - self.current_crop[2], self.current_crop[0]))
+        self.current_crop[1] = max(0, min(h - self.current_crop[2], self.current_crop[1]))
+
+    def _apply_current_crop(self, frame):
+        """Apply current crop to frame using hardware ScalerCrop when possible"""
+        if self.current_crop is None or frame is None:
+            return
+            
         try:
-            cropped = frame[y:y+size, x:x+size]
-            return cv2.resize(cropped, (1100, 1100))
+            # Convert to sensor coordinates and update ScalerCrop
+            x, y, size = self.current_crop
+            sensor_x, sensor_y, sensor_size = self._convert_to_sensor_coordinates(
+                x, y, size, frame.shape[1], frame.shape[0]
+            )
+            self.camera_manager.picam2.set_controls({
+                "ScalerCrop": (sensor_x, sensor_y, sensor_size, sensor_size)
+            })
         except Exception as e:
-            return frame
-            
-    def _display_loop(self):
-        """Main display loop synchronized with face processor"""
-        last_process_time = time.monotonic()
-        
-        while self.running:
-            current_time = time.monotonic()
-            
-            # Process frame at 5 FPS to match face processor
-            if current_time - last_process_time >= self.min_process_interval:
-                frame = self.camera_manager.get_latest_frame()
-                if frame is not None:
-                    processed_frame = self._process_frame(frame)
-                    if processed_frame is not None:
-                        # Convert to RGBA for overlay
-                        processed_frame = cv2.cvtColor(processed_frame, cv2.COLOR_RGB2RGBA)
-                        self.camera_manager.picam2.set_overlay(processed_frame)
-                last_process_time = current_time
-            
-            # Small sleep to prevent CPU thrashing
-            time.sleep(0.001) 
+            # If hardware crop fails, we don't fall back to software crop
+            # This keeps the display pipeline fast
+            pass 
