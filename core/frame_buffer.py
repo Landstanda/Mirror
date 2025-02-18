@@ -1,10 +1,12 @@
 from collections import deque
 import threading
 import numpy as np
+from typing import Optional
+import queue
 
 class FrameBuffer:
     """
-    Optimized frame buffer with minimal copying
+    Optimized frame buffer with minimal locking and atomic operations
     
     Features:
     - Thread-safe frame storage
@@ -19,43 +21,49 @@ class FrameBuffer:
         Args:
             buffer_size: Maximum number of frames to store
         """
-        self.frames = deque(maxlen=buffer_size)
-        self.lock = threading.Lock()
+        self._frames = queue.Queue(maxsize=buffer_size)
+        self._latest_frame = None  # Atomic latest frame reference
+        self._latest_frame_lock = threading.Lock()  # Separate lock for latest frame
         
     def add_frame(self, frame: np.ndarray):
-        """
-        Add a new frame to the buffer without copying
-        Args:
-            frame: numpy array containing the frame data
-        """
+        """Add a new frame, dropping oldest if buffer is full"""
         if frame is not None:
-            with self.lock:
-                # Only copy if we need to preserve the original frame
-                # In our case, the camera provides a new array each time
-                self.frames.append(frame)
+            # Update latest frame atomically
+            with self._latest_frame_lock:
+                self._latest_frame = frame
+            
+            # Try to add to queue without blocking
+            try:
+                self._frames.put_nowait(frame)
+            except queue.Full:
+                # Queue is full, remove oldest frame
+                try:
+                    self._frames.get_nowait()
+                    self._frames.put_nowait(frame)
+                except (queue.Empty, queue.Full):
+                    pass  # Race condition handled gracefully
                 
-    def get_latest_frame(self) -> np.ndarray:
-        """
-        Get the most recent frame from the buffer without copying
-        Returns:
-            Reference to the most recent frame, or None if buffer is empty
-        """
-        with self.lock:
-            return self.frames[-1] if self.frames else None
+    def get_latest_frame(self) -> Optional[np.ndarray]:
+        """Get latest frame with minimal locking"""
+        with self._latest_frame_lock:
+            return self._latest_frame
             
     def clear(self):
-        """Clear all frames from the buffer"""
-        with self.lock:
-            self.frames.clear()
+        """Clear buffer efficiently"""
+        while not self._frames.empty():
+            try:
+                self._frames.get_nowait()
+            except queue.Empty:
+                break
+        with self._latest_frame_lock:
+            self._latest_frame = None
             
     @property
     def is_empty(self) -> bool:
-        """Check if buffer is empty"""
-        with self.lock:
-            return len(self.frames) == 0
+        """Check if buffer is empty without locking"""
+        return self._frames.empty() and self._latest_frame is None
             
     @property
     def size(self) -> int:
-        """Get current number of frames in buffer"""
-        with self.lock:
-            return len(self.frames) 
+        """Get approximate size without locking"""
+        return self._frames.qsize() 

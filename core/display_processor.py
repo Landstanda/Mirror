@@ -32,10 +32,11 @@ class DisplayProcessor:
         self.current_crop = None  # [x, y, size]
         self.target_crop = None   # [x, y, size]
         self.velocity = [0, 0, 0]  # Velocity for x, y, and size
-        self.spring_constant = 4.0  # How quickly it moves toward target (higher = faster)
-        self.damping = 0.8  # How quickly it stabilizes (higher = more damping)
-        self.deadzone_factor = 0.05
-        self.size_deadzone_factor = 0.05
+        self.spring_constant = 2.0  # Reduced for smoother motion
+        self.damping = 4.0  # Increased damping to reduce small adjustments
+        self.max_velocity = 100  # Limit maximum velocity to prevent overshooting
+        self.deadzone_factor = 0.2
+        self.size_deadzone_factor = 0.2
         
         # Separate face detection from display updates
         self.last_face_data = None
@@ -159,7 +160,7 @@ class DisplayProcessor:
             time.sleep(0.001)
 
     def _update_crop_with_face(self, face_data):
-        """Update crop based on face detection data with spring-damper smoothing"""
+        """Update crop based on face detection data with critically damped smoothing"""
         if face_data is None:
             return
             
@@ -205,7 +206,7 @@ class DisplayProcessor:
         # Update target crop
         self.target_crop = [target_x, target_y, target_size]
         
-        # Apply spring-damper smoothing
+        # Apply critically damped smoothing
         dt = 1/5.0  # Time step (5 FPS)
         for i in range(3):  # For x, y, and size
             # Calculate spring force
@@ -215,11 +216,19 @@ class DisplayProcessor:
             # Apply damping force
             damping_force = -self.damping * self.velocity[i]
             
-            # Update velocity
+            # Update velocity with limiting
             self.velocity[i] += (spring_force + damping_force) * dt
             
-            # Update position
-            self.current_crop[i] += self.velocity[i] * dt
+            # Limit velocity magnitude
+            self.velocity[i] = max(-self.max_velocity, min(self.max_velocity, self.velocity[i]))
+            
+            # If very close to target and moving slowly, just stop
+            if abs(displacement) < 1.0 and abs(self.velocity[i]) < 0.5:
+                self.velocity[i] = 0
+                self.current_crop[i] = self.target_crop[i]
+            else:
+                # Update position
+                self.current_crop[i] += self.velocity[i] * dt
             
         # Ensure integer coordinates
         self.current_crop = [int(v) for v in self.current_crop]

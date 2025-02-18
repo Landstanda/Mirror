@@ -125,30 +125,45 @@ class FaceProcessor:
             return None
         
     def _smooth_face_data(self, new_data: FaceData):
-        """Apply smoothing to face tracking data"""
+        """Apply smoothing to face tracking data with minimal locking"""
         if self.current_face_data is None:
+            # First face detection, just set it directly
             with self.lock:
                 self.current_face_data = new_data
             return
             
-        # Smooth bounding box
+        # Calculate smoothed values without holding the lock
+        smoothed_bbox = []
+        for i in range(4):
+            current = self.current_face_data.bbox[i]  # Read once
+            smoothed = (
+                self.smoothing_factor * new_data.bbox[i] +
+                (1 - self.smoothing_factor) * current
+            )
+            smoothed_bbox.append(smoothed)
+            
+        # Calculate smoothed landmarks without holding the lock
+        smoothed_landmarks = []
+        for i in range(len(new_data.landmarks)):
+            current_x = self.current_face_data.landmarks[i][0]  # Read once
+            current_y = self.current_face_data.landmarks[i][1]  # Read once
+            
+            x = (self.smoothing_factor * new_data.landmarks[i][0] +
+                 (1 - self.smoothing_factor) * current_x)
+            y = (self.smoothing_factor * new_data.landmarks[i][1] +
+                 (1 - self.smoothing_factor) * current_y)
+            smoothed_landmarks.append((x, y))
+            
+        # Create new face data object
+        smoothed_data = FaceData(
+            bbox=smoothed_bbox,
+            landmarks=smoothed_landmarks,
+            confidence=new_data.confidence
+        )
+        
+        # Minimal lock time: just for the assignment
         with self.lock:
-            for i in range(4):
-                self.current_face_data.bbox[i] = (
-                    self.smoothing_factor * new_data.bbox[i] +
-                    (1 - self.smoothing_factor) * self.current_face_data.bbox[i]
-                )
-                
-            # Smooth landmarks
-            for i in range(len(new_data.landmarks)):
-                x = (self.smoothing_factor * new_data.landmarks[i][0] +
-                     (1 - self.smoothing_factor) * self.current_face_data.landmarks[i][0])
-                y = (self.smoothing_factor * new_data.landmarks[i][1] +
-                     (1 - self.smoothing_factor) * self.current_face_data.landmarks[i][1])
-                self.current_face_data.landmarks[i] = (x, y)
-                
-            # Update confidence
-            self.current_face_data.confidence = new_data.confidence
+            self.current_face_data = smoothed_data
             
     def _processing_loop(self):
         """Main processing loop running in separate thread"""

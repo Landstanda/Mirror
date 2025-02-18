@@ -58,56 +58,40 @@ class AsyncHelper:
                 print(f"Error in event loop: {e}")
                 
     def _process_task(self, task_id: str, func: Callable, args: tuple, kwargs: dict):
-        """Process a single task in the thread pool"""
+        """Process a single task in the thread pool with minimal locking"""
         try:
             future = self.executor.submit(func, *args, **kwargs)
             result = future.result(timeout=1.0)
-            with self.lock:
+            
+            # Use non-blocking dictionary update
+            if result is not None:
                 self.results[task_id] = result
+                
         except Exception as e:
             print(f"Error processing task {task_id}: {e}")
             
     def schedule_task(self, func: Callable, priority: int = 1, 
                      task_id: Optional[str] = None, *args, **kwargs) -> str:
-        """
-        Schedule a task for asynchronous execution
-        
-        Args:
-            func: Function to execute
-            priority: Task priority (lower number = higher priority)
-            task_id: Optional identifier for the task
-            *args, **kwargs: Arguments for the function
-            
-        Returns:
-            task_id: Identifier for retrieving results
-        """
+        """Schedule task with minimal blocking"""
         if task_id is None:
             task_id = str(time.monotonic())
             
-        self.task_queue.put((priority, task_id, func, args, kwargs))
+        try:
+            self.task_queue.put_nowait((priority, task_id, func, args, kwargs))
+        except queue.Full:
+            print(f"Warning: Task queue full, dropping task {task_id}")
+            
         return task_id
         
     def get_result(self, task_id: str, clear: bool = True) -> Any:
-        """
-        Get the result of a scheduled task
-        
-        Args:
-            task_id: Task identifier
-            clear: Whether to remove the result after retrieval
-            
-        Returns:
-            Result of the task, or None if not available
-        """
-        with self.lock:
-            result = self.results.get(task_id)
-            if clear and result is not None:
-                del self.results[task_id]
-        return result
+        """Get result with minimal locking using dict.pop()"""
+        if clear:
+            return self.results.pop(task_id, None)
+        return self.results.get(task_id)
         
     def clear_results(self):
-        """Clear all stored results"""
-        with self.lock:
-            self.results.clear()
+        """Clear results without locking"""
+        self.results.clear()
             
     @property
     def pending_tasks(self) -> int:
