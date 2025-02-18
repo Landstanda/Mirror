@@ -41,7 +41,8 @@ class CameraManager:
         
         # Create video configuration optimized for low latency
         video_config = self.picam2.create_video_configuration(
-            {"size": (1100, 1100)},
+            # Main stream configuration
+            main={"size": (1100, 1100), "format": "RGB888"},  # Direct RGB format
             transform=Transform(hflip=False, vflip=True),
             buffer_count=2,  # Minimum for stable operation
             queue=True,
@@ -61,7 +62,7 @@ class CameraManager:
             self.picam2.options["enable_raw"] = True
             self.picam2.options["use_dma"] = True  # Enable DMA for frame transfer
             self.picam2.options["buffer_count"] = 2  # Ensure buffer count matches
-            self.picam2.options["callback_format"] = "RGB888"
+            self.picam2.options["callback_format"] = "RGB888"  # Match main format
             print("Camera options configured")
             
         except Exception as e:
