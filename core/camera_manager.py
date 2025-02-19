@@ -31,7 +31,7 @@ class CameraManager:
         self.frame_times = deque(maxlen=60)  # Store last 60 frame timestamps
         self.latency_times = deque(maxlen=60)  # Store last 60 latency measurements
         self.last_fps_print = 0
-        self.fps_print_interval = 1.0  # Print stats every second
+        self.fps_print_interval = 7.0  # Print stats every 7 seconds
         
         self.configure_camera()
         

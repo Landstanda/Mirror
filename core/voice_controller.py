@@ -74,7 +74,7 @@ class VoiceController:
         print(f"Loading Vosk model from {model_path}...")
         try:
             self.model = Model(model_path)
-            self.recognizer = KaldiRecognizer(self.model, 16000)
+            self.recognizer = KaldiRecognizer(self.model, 44100)  # Use 44100Hz directly since we know it works
         except Exception as e:
             raise RuntimeError(f"Failed to initialize Vosk: {e}")
             
@@ -82,34 +82,53 @@ class VoiceController:
         try:
             self.audio = pyaudio.PyAudio()
             
-            # Find appropriate input device
+            # List available audio devices
+            print("\nAvailable Audio Devices:")
+            info = self.audio.get_host_api_info_by_index(0)
+            numdevices = info.get('deviceCount')
             input_device_index = None
-            for i in range(self.audio.get_device_count()):
+            
+            for i in range(0, numdevices):
                 device_info = self.audio.get_device_info_by_index(i)
-                if device_info['maxInputChannels'] > 0:
-                    input_device_index = i
-                    break
-                    
+                if device_info.get('maxInputChannels') > 0:
+                    print(f"Device {i}: {device_info.get('name')}")
+                    print(f"  Max Input Channels: {device_info.get('maxInputChannels')}")
+                    print(f"  Default Sample Rate: {int(device_info.get('defaultSampleRate'))}Hz")
+                    # Prefer USB audio devices or devices with "mic" in name
+                    if input_device_index is None or \
+                       ('usb' in device_info.get('name').lower()) or \
+                       ('mic' in device_info.get('name').lower()):
+                        input_device_index = i
+            
             if input_device_index is None:
                 raise RuntimeError("No audio input device found")
                 
-            # Configure audio stream
+            print(f"\nSelected device {input_device_index} for audio input")
+            
+            # Configure audio stream with known working parameters
             self.stream = self.audio.open(
                 format=pyaudio.paInt16,
                 channels=1,
-                rate=16000,
+                rate=44100,
                 input=True,
                 input_device_index=input_device_index,
-                frames_per_buffer=4000,
+                frames_per_buffer=2048,
                 stream_callback=self._audio_callback
             )
-            print(f"Audio initialized using device {input_device_index}")
+            print("Successfully opened audio stream at 44100Hz")
             
         except Exception as e:
             if hasattr(self, 'audio'):
                 self.audio.terminate()
             raise RuntimeError(f"Failed to initialize audio: {e}")
             
+        print("\n🎤 Voice control ready! Try saying commands like:")
+        print("   - 'mirror eyes'")
+        print("   - 'mirror lips'")
+        print("   - 'mirror face'")
+        print("   - 'mirror zoom out'")
+        print("   - 'mirror focus'\n")
+        
     def _audio_callback(self, in_data, frame_count, time_info, status):
         """Handle audio data asynchronously"""
         if self.running:
@@ -156,21 +175,27 @@ class VoiceController:
     def _process_command(self, text: str):
         """Process recognized text for commands"""
         text = text.lower()
-        print(f"Heard: {text}")
+        print(f"\n👂 Heard: '{text}'")  # Make voice input more visible
         
+        # Check for wake word
+        if "mirror" in text:
+            print("🎯 Wake word detected!")
+            
         # Schedule command execution in async helper
         for command in VoiceCommand:
             if command.value in text:
                 callback = self.command_callbacks.get(command)
                 if callback:
-                    print(f"Executing command: {command.name}")
+                    print(f"🎤 Executing command: {command.name}")
                     self.async_helper.schedule_task(
                         callback,
                         priority=1,  # Lower priority for command execution
                         task_id=f"cmd_{command.name}_{time.monotonic()}"
                     )
-                break
-                
+                    return  # Exit after first command match
+                    
+        print("❌ No command recognized")  # Print when no command matches
+        
     def start(self):
         """Start voice recognition"""
         if not self.running:

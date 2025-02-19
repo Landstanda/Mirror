@@ -1,30 +1,31 @@
 import time
 import threading
-import RPi.GPIO as GPIO
-import numpy as np
-from typing import Optional, Callable
+import os
+from typing import Optional, Deque
+from collections import deque
+from gpiozero import DistanceSensor as GPIOZeroDistance
+from core.async_helper import AsyncHelper
+
+# Tell gpiozero to use lgpio by default
+os.environ['GPIOZERO_PIN_FACTORY'] = 'lgpio'
 
 class DistanceSensor:
     """
     Asynchronous distance sensor management with focus mapping
     
     Features:
-    - Non-blocking operation in separate thread
+    - Non-blocking operation using gpiozero
     - Direct mapping to focus values
     - 5Hz sampling rate (200ms interval)
-    - Linear interpolation for focus mapping
-    
-    Hardware Setup:
-    - GPIO Trigger Pin
-    - GPIO Echo Pin
-    - 3.3V power supply
+    - Performance monitoring
+    - Resource cleanup
     """
     
-    def __init__(self, trigger_pin: int, echo_pin: int, callback: Optional[Callable[[float], None]] = None):
+    def __init__(self, trigger_pin: int, echo_pin: int, async_helper: Optional[AsyncHelper] = None):
         # GPIO setup
         self.trigger_pin = trigger_pin
         self.echo_pin = echo_pin
-        self.callback = callback
+        self.async_helper = async_helper
         
         # Threading controls
         self.running = False
@@ -36,74 +37,58 @@ class DistanceSensor:
         self.max_distance = 150.0  # cm
         self.sample_interval = 0.2  # 200ms = 5Hz
         
-        # Focus mapping parameters (based on provided measurements)
+        # Performance monitoring
+        self.measure_times = deque(maxlen=60)  # Store last 60 measurements
+        self.last_stats_print = 0
+        self.stats_print_interval = 7.0  # Print stats every 7 seconds
+        
+        # Focus mapping parameters (based on camera characteristics)
         self.distance_focus_map = {
-            50.0: 12.0,  # At 50cm, focus = 12
-            100.0: 9.0   # At 100cm, focus = 9
+            20.0: 12.5,  # Close focus
+            50.0: 12.0,  # Medium-close focus
+            100.0: 9.0,  # Medium-far focus
+            150.0: 8.0   # Far focus
         }
         
-        # Initialize GPIO
-        self._setup_gpio()
-        
-    def _setup_gpio(self):
-        """Initialize GPIO pins"""
-        print(f"Setting up GPIO: Trigger={self.trigger_pin}, Echo={self.echo_pin}")
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setup(self.trigger_pin, GPIO.OUT)
-        GPIO.setup(self.echo_pin, GPIO.IN)
-        GPIO.output(self.trigger_pin, False)
-        time.sleep(0.1)  # Give sensor time to settle
-        print("GPIO setup complete")
-        
+        # Initialize sensor
+        print(f"Initializing HC-SR04 distance sensor on pins: Trigger={trigger_pin}, Echo={echo_pin}")
+        try:
+            # Note: gpiozero expects echo_pin first, then trigger_pin
+            self.sensor = GPIOZeroDistance(
+                echo=echo_pin,
+                trigger=trigger_pin,
+                max_distance=2.0,  # Maximum distance in meters
+                threshold_distance=0.3  # Threshold for when_in_range
+            )
+            print("Distance sensor initialized successfully")
+        except Exception as e:
+            print(f"Failed to initialize distance sensor: {e}")
+            raise
+            
     def _measure_distance(self) -> float:
         """
         Measure distance using ultrasonic sensor
         Returns: distance in centimeters
         """
-        # Reset trigger
-        GPIO.output(self.trigger_pin, False)
-        time.sleep(0.05)  # Give sensor time to settle
-        
-        # Send trigger pulse
-        GPIO.output(self.trigger_pin, True)
-        time.sleep(0.00001)  # 10 microseconds
-        GPIO.output(self.trigger_pin, False)
-        
-        # Wait for echo to start
-        pulse_start = time.time()
-        timeout = pulse_start + 0.1  # 100ms timeout
-        
-        # Debug echo pin state
-        echo_state = GPIO.input(self.echo_pin)
-        print(f"Initial echo pin state: {echo_state}")
-        
-        # Wait for echo to go HIGH
-        while GPIO.input(self.echo_pin) == 0:
-            pulse_start = time.time()
-            if pulse_start > timeout:
-                print("Timeout waiting for echo start")
-                return self.current_distance
-        
-        # Wait for echo to go LOW
-        pulse_end = time.time()
-        while GPIO.input(self.echo_pin) == 1:
-            pulse_end = time.time()
-            if pulse_end > timeout:
-                print("Timeout waiting for echo end")
-                return self.current_distance
-        
-        # Calculate distance
-        pulse_duration = pulse_end - pulse_start
-        distance = pulse_duration * 17150  # Speed of sound = 343m/s
-        
-        # Debug pulse information
-        print(f"Pulse duration: {pulse_duration*1000:.3f}ms")
-        print(f"Raw distance: {distance:.1f}cm")
-        
-        # Clamp to valid range
-        distance = max(self.min_distance, min(self.max_distance, distance))
-        return distance
-        
+        try:
+            start_time = time.monotonic()
+            
+            # Get distance in meters and convert to cm
+            distance_cm = self.sensor.distance * 100
+            
+            # Clamp to valid range
+            distance_cm = max(self.min_distance, min(self.max_distance, distance_cm))
+            
+            # Record measurement time
+            measure_time = time.monotonic() - start_time
+            self.measure_times.append(measure_time)
+            
+            return distance_cm
+            
+        except Exception as e:
+            print(f"Error in distance measurement: {e}")
+            return self.current_distance
+            
     def _map_distance_to_focus(self, distance: float) -> float:
         """
         Map distance to focus value using linear interpolation
@@ -141,22 +126,51 @@ class DistanceSensor:
             
             # Check if it's time for a new reading
             if current_time - last_read_time >= self.sample_interval:
-                # Measure distance
-                distance = self._measure_distance()
-                self.current_distance = distance
-                
-                # Calculate focus value
-                focus = self._map_distance_to_focus(distance)
-                
-                # Notify callback if set
-                if self.callback:
-                    self.callback(focus)
+                try:
+                    # Measure distance
+                    distance = self._measure_distance()
+                    self.current_distance = distance
                     
-                last_read_time = current_time
+                    # Calculate focus value
+                    focus = self._map_distance_to_focus(distance)
+                    
+                    # Schedule focus update if using AsyncHelper
+                    if self.async_helper is not None:
+                        self.async_helper.schedule_task(
+                            lambda f=focus: self._update_focus(f),
+                            priority=3,
+                            task_id=f"focus_update_{current_time}"
+                        )
+                    
+                    last_read_time = current_time
+                    
+                    # Print performance stats periodically
+                    if current_time - self.last_stats_print >= self.stats_print_interval:
+                        self._print_performance_stats()
+                        self.last_stats_print = current_time
+                        
+                except Exception as e:
+                    print(f"Error in sensor loop: {e}")
             
             # Small sleep to prevent CPU thrashing
             time.sleep(0.01)
             
+    def _print_performance_stats(self):
+        """Print performance statistics"""
+        if len(self.measure_times) > 0:
+            avg_time = sum(self.measure_times) / len(self.measure_times) * 1000
+            current_distance = self.get_current_distance()
+            current_focus = self.get_current_focus()
+            print(f"\n=== Distance Sensor Status ===")
+            print(f"Distance: {current_distance:.1f}cm")
+            print(f"Focus Setting: {current_focus:.2f}")
+            print(f"Avg measurement time: {avg_time:.1f}ms")
+            print("===========================\n")
+            
+    def _update_focus(self, focus_value: float):
+        """Update focus value (placeholder for callback)"""
+        pass  # This will be set by the main program
+        
     def start(self):
         """Start the distance sensor"""
         if not self.running:
@@ -166,12 +180,18 @@ class DistanceSensor:
             self.thread.start()
             
     def stop(self):
-        """Stop the distance sensor"""
+        """Stop the distance sensor and cleanup"""
         print("Stopping distance sensor")
         self.running = False
         if self.thread:
             self.thread.join(timeout=1.0)
-        GPIO.cleanup([self.trigger_pin, self.echo_pin])
+            
+        # Cleanup sensor
+        try:
+            self.sensor.close()
+        except Exception as e:
+            print(f"Sensor cleanup warning: {e}")
+            
         print("Distance sensor stopped")
         
     def get_current_distance(self) -> float:
