@@ -72,12 +72,29 @@ class AsyncHelper:
             
     def schedule_task(self, func: Callable, priority: int = 1, 
                      task_id: Optional[str] = None, *args, **kwargs) -> str:
-        """Schedule task with minimal blocking"""
+        """
+        Schedule task with minimal blocking
+        
+        Args:
+            func: Function to execute
+            priority: Task priority (lower number = higher priority)
+            task_id: Optional task identifier
+            *args: Positional arguments for the function
+            **kwargs: Keyword arguments for the function
+        """
         if task_id is None:
             task_id = str(time.monotonic())
             
         try:
-            self.task_queue.put_nowait((priority, task_id, func, args, kwargs))
+            # Convert args and kwargs to proper format
+            task_args = args if args else ()
+            task_kwargs = kwargs if kwargs else {}
+            
+            # Remove 'args' and 'kwargs' from task_kwargs if they exist
+            task_kwargs.pop('args', None)
+            task_kwargs.pop('kwargs', None)
+            
+            self.task_queue.put_nowait((priority, task_id, func, task_args, task_kwargs))
         except queue.Full:
             print(f"Warning: Task queue full, dropping task {task_id}")
             
