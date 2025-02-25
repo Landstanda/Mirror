@@ -1,0 +1,7 @@
+self.distance_focus_map = {
+    32.9: 11.00,  # Closest focus
+    43.0: 10.30,
+    50.6: 10.30,
+    60.7: 9.60,
+    87.1: 9.50,  # Farthest focus
+}

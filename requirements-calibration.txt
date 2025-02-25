@@ -1,0 +1,8 @@
+# Core dependencies
+numpy>=1.20.0
+matplotlib>=3.5.0
+
+# These are typically installed via apt and not pip
+# but listed here for documentation
+# picamera2
+# gpiozero 

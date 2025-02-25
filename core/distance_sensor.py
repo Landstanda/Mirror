@@ -44,10 +44,11 @@ class DistanceSensor:
         
         # Focus mapping parameters (based on camera characteristics)
         self.distance_focus_map = {
-            20.0: 12.5,  # Close focus
-            50.0: 12.0,  # Medium-close focus
-            100.0: 9.0,  # Medium-far focus
-            150.0: 8.0   # Far focus
+            32.9: 11.00,  # Closest focus
+            43.0: 10.30,
+            50.6: 10.30,
+            60.7: 9.60,
+            87.1: 9.50,  # Farthest focus
         }
         
         # Initialize sensor
