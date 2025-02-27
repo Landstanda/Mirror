@@ -132,22 +132,10 @@ class DisplayProcessor:
         # Calculate scaling based on the minimum sensor dimension to ensure square
         frame_scale = sensor_dim / max(frame_width, frame_height)
 
-        # Scale size while maintaining square, but respect camera's max height
-        MAX_CAMERA_HEIGHT = 4320  # Camera's maximum supported height
-        sensor_size = int(size * frame_scale)
-        sensor_size = min(sensor_size, sensor_dim, MAX_CAMERA_HEIGHT)  # Ensure it fits within all constraints
-        
-        # Calculate center point and scale
-        center_x = x + (size / 2)
-        center_y = y + (size / 2)
-        
-        # Scale and center the crop in the square sensor region
-        sensor_center_x = int(center_x * frame_scale)
-        sensor_center_y = int(center_y * frame_scale)
-        
-        # Calculate final coordinates
-        sensor_x = sensor_center_x - (sensor_size // 2)
-        sensor_y = sensor_center_y - (sensor_size // 2)
+        # Scale coordinates to sensor space while preserving the original crop size ratio
+        sensor_x = int(x * frame_scale)
+        sensor_y = int(y * frame_scale)
+        sensor_size = int(size * frame_scale)  # Scale size proportionally with frame
         
         # Center in the actual sensor area (which may be non-square)
         if self.SENSOR_WIDTH > sensor_dim:

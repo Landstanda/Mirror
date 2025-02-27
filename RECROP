@@ -1,0 +1,190 @@
+# Two-Stage Cropping Implementation Guide
+# For MirrorAphrodite Display System
+
+## Overview
+This guide outlines the steps to implement a two-stage cropping system that:
+1. Uses conservative hardware sensor cropping to maintain face detection context
+2. Applies software-based display cropping for final zoom levels
+
+## Implementation Steps
+
+### 1. Add New Constants to DisplayProcessor
+```python
+# At the top of DisplayProcessor class
+SENSOR_CROP_MARGIN = 1.5  # Keeps 1.5x the face bbox in sensor crop
+```
+
+### 2. Add New Instance Variables
+```python
+def __init__(self, camera_manager, face_processor):
+    # ... existing init code ...
+    
+    # Add new position tracking variables
+    self.sensor_position = None  # [x, y, size] for hardware crop
+    self.display_position = None  # [x, y, size] for software crop
+```
+
+### 3. Modify _update_crop_with_face Method
+```python
+def _update_crop_with_face(self, face_data):
+    """Update crop based on face detection data"""
+    if face_data is None:
+        return
+        
+    h, w = self.camera_manager.get_latest_frame().shape[:2]
+    bbox = face_data.bbox
+    
+    # Get center point based on current zoom level
+    center_x, center_y = self._get_landmark_center(face_data.landmarks, self.current_zoom)
+    center_x = int(center_x * w)
+    center_y = int(center_y * h)
+    
+    # Calculate face width in pixels
+    face_w = int(bbox[2] * w)
+    
+    # 1. Calculate sensor crop - always keep the full face plus margin
+    sensor_ratio = self.SENSOR_CROP_MARGIN
+    sensor_size = int(face_w * sensor_ratio)
+    sensor_size = sensor_size + (sensor_size % 2)  # Ensure even size
+    
+    # Center the sensor crop on the nose (or face center) for stability
+    nose_x, nose_y = face_data.landmarks[2]
+    nose_x = int(nose_x * w)
+    nose_y = int(nose_y * h)
+    
+    self.sensor_position = [
+        int(nose_x - sensor_size / 2),  # x
+        int(nose_y - sensor_size / 2),  # y
+        sensor_size                      # size
+    ]
+    
+    # 2. Calculate display crop - this is the actual zoom level
+    display_ratio = self.zoom_ratios[self.current_zoom]
+    display_size = int(face_w * display_ratio)
+    display_size = display_size + (display_size % 2)  # Ensure even size
+    
+    self.display_position = [
+        int(center_x - display_size / 2),  # x
+        int(center_y - display_size / 2),  # y
+        display_size                        # size
+    ]
+    
+    # Initialize or update positions with smoothing
+    if self.current_position is None:
+        self.current_position = self.display_position
+    else:
+        self._smooth_position_update(self.display_position)
+```
+
+### 4. Add render_display_frame Method
+```python
+def render_display_frame(self, frame):
+    """Apply the second-stage display crop to the frame"""
+    if frame is None or self.sensor_position is None or self.display_position is None:
+        return frame
+        
+    try:
+        # Calculate the display crop relative to the sensor crop
+        rel_x = self.display_position[0] - self.sensor_position[0]
+        rel_y = self.display_position[1] - self.sensor_position[1]
+        rel_size = self.display_position[2]
+        
+        # Ensure crop is within bounds
+        h, w = frame.shape[:2]
+        crop_x = max(0, min(w - rel_size, rel_x))
+        crop_y = max(0, min(h - rel_size, rel_y))
+        
+        # Apply the crop
+        cropped = frame[crop_y:crop_y+rel_size, crop_x:crop_x+rel_size]
+        
+        # Resize to display dimensions if needed
+        return cropped
+        
+    except Exception as e:
+        print(f"Error in render_display_frame: {e}")
+        return frame
+```
+
+### 5. Modify _apply_current_crop Method
+```python
+def _apply_current_crop(self, frame):
+    """Apply two-stage cropping: sensor crop + display crop"""
+    if self.sensor_position is None or frame is None:
+        return
+        
+    try:
+        # 1. Apply sensor crop using hardware ScalerCrop
+        sensor_x, sensor_y, sensor_size = self._convert_to_sensor_coordinates(
+            self.sensor_position[0], 
+            self.sensor_position[1], 
+            self.sensor_position[2], 
+            frame.shape[1], 
+            frame.shape[0]
+        )
+        
+        self.camera_manager.picam2.set_controls({
+            "ScalerCrop": (sensor_x, sensor_y, sensor_size, sensor_size)
+        })
+        
+    except Exception as e:
+        print(f"Error in _apply_current_crop: {e}")
+```
+
+### 6. Update _display_loop Method
+```python
+def _display_loop(self):
+    """Main display loop running at camera FPS"""
+    while self.running:
+        current_time = time.monotonic()
+        
+        # Only update at target frame rate
+        if current_time - self.last_display_update >= self.min_display_interval:
+            frame = self.camera_manager.get_latest_frame()
+            if frame is not None:
+                # Simple reactive face tracking
+                face_data = self.face_processor.get_current_face_data()
+                if face_data is not None:
+                    self._update_crop_with_face(face_data)
+                
+                # Apply sensor crop (hardware)
+                self._apply_current_crop(frame)
+                
+                # Apply display crop (software)
+                display_frame = self.render_display_frame(frame)
+                
+                # Send to display
+                # (implementation depends on your display system)
+                
+                self.last_display_update = current_time
+        
+        # Small sleep to prevent CPU thrashing
+        time.sleep(0.001)
+```
+
+## Testing Steps
+
+1. First test with a larger SENSOR_CROP_MARGIN (e.g., 2.0) to ensure face detection remains stable
+2. Verify that face detection continues to work when moving closer to the camera
+3. Check that eye-zoom mode maintains consistent zoom level without over-zooming
+4. Test recovery when face tracking is temporarily lost
+5. Adjust SENSOR_CROP_MARGIN if needed to balance between tracking stability and processing efficiency
+
+## Troubleshooting
+
+If face tracking becomes unstable:
+1. Increase SENSOR_CROP_MARGIN
+2. Check that sensor_position is properly centered on the nose/face center
+3. Verify that the relative coordinates in render_display_frame are calculated correctly
+
+If performance is impacted:
+1. Consider reducing the sensor crop size while maintaining the margin ratio
+2. Optimize the software cropping operation
+3. Ensure the display frame rate is properly capped
+
+## Notes
+
+- The two-stage approach separates the concerns of face detection and display zooming
+- Hardware sensor crop provides the face detector with consistent, sufficient context
+- Software display crop handles the actual zoom levels seen by the user
+- This should prevent the feedback loop that was causing over-zooming
+- Recovery is possible because the face detector always has enough context to reacquire the face 
