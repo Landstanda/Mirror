@@ -1,5 +1,8 @@
 import os
 import time
+import signal
+import threading
+import sys
 from core.camera_manager import CameraManager, ZoomLevel
 from core.face_processor import CameraFaceProcessor
 from core.display_processor import DisplayProcessor
@@ -11,7 +14,36 @@ from core.async_helper import AsyncHelper
 os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = "/usr/lib/aarch64-linux-gnu/qt5/plugins/platforms"
 os.environ["QT_QPA_PLATFORM"] = "xcb"
 
+# Global flag for shutdown
+shutdown_requested = False
+force_shutdown_timer = None
+
+def signal_handler(sig, frame):
+    """Handle Ctrl+C and other termination signals"""
+    global shutdown_requested, force_shutdown_timer
+    
+    if not shutdown_requested:
+        print("\nShutdown requested. Press Ctrl+C again to force immediate exit.")
+        shutdown_requested = True
+        
+        # Set a timer for force shutdown if normal shutdown takes too long
+        force_shutdown_timer = threading.Timer(5.0, force_shutdown)
+        force_shutdown_timer.daemon = True
+        force_shutdown_timer.start()
+    else:
+        # Second Ctrl+C, force immediate exit
+        force_shutdown()
+
+def force_shutdown():
+    """Force immediate shutdown"""
+    print("\nForce shutdown initiated. Exiting immediately.")
+    os._exit(1)  # Force exit without cleanup
+
 def main():
+    # Register signal handler for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     print("Initializing Mirror System...")
     
     # Initialize shared components
@@ -29,6 +61,9 @@ def main():
             echo_pin=24,
             async_helper=async_helper
         )
+        # Configure distance sensor
+        distance_sensor.focus_smoothing_enabled = True  # Enable focus smoothing
+        distance_sensor.sample_interval = 0.2  # 5Hz sampling rate (reduced from 10Hz)
         distance_sensor_initialized = True
         print("Distance sensor initialized successfully")
     except Exception as e:
@@ -44,7 +79,7 @@ def main():
             VoiceCommand.LIPS: lambda: display_processor.set_zoom_level(ZoomLevel.LIPS),
             VoiceCommand.FACE: lambda: display_processor.set_zoom_level(ZoomLevel.FACE),
             VoiceCommand.ZOOM_OUT: lambda: display_processor.set_zoom_level(ZoomLevel.WIDE),
-            VoiceCommand.FOCUS: lambda: camera.set_focus(10.0)  # Default focus for now
+            VoiceCommand.FOCUS: lambda: camera.set_focus(distance_sensor.get_current_focus() if distance_sensor_initialized else 10.0)
         }
     
     # Initialize voice controller with callbacks
@@ -92,35 +127,62 @@ def main():
             print("Starting voice controller...")
             voice_controller.start()
         
-        print("\nSystem running. Press Ctrl+C to quit.")
+        print("\nSystem ready! Press Ctrl+C to exit.")
         
-        # Main loop - keep the program running
-        while True:
+        # Main loop
+        while not shutdown_requested:
             time.sleep(0.1)
             
     except KeyboardInterrupt:
-        print("\nShutting down...")
+        print("\nShutdown requested...")
+    except Exception as e:
+        print(f"\nError in main loop: {e}")
     finally:
-        # Clean up in reverse order
+        # Cancel force shutdown timer if it's running
+        if force_shutdown_timer and force_shutdown_timer.is_alive():
+            force_shutdown_timer.cancel()
+        
+        # Ensure clean shutdown of all components
+        print("Cleaning up resources...")
+        
+        # Shutdown components in reverse order of initialization
         if voice_controller_initialized:
-            print("Stopping voice controller...")
-            voice_controller.stop()
-            
+            try:
+                print("Stopping voice controller...")
+                voice_controller.stop()
+            except Exception as e:
+                print(f"Error stopping voice controller: {e}")
+        
         if distance_sensor_initialized:
-            print("Stopping distance sensor...")
-            distance_sensor.stop()
+            try:
+                print("Stopping distance sensor...")
+                distance_sensor.stop()
+            except Exception as e:
+                print(f"Error stopping distance sensor: {e}")
         
-        print("Stopping display processor...")
-        display_processor.stop()
+        try:
+            print("Stopping display processor...")
+            display_processor.stop()
+        except Exception as e:
+            print(f"Error stopping display processor: {e}")
         
-        print("Stopping face processor...")
-        face_processor.stop()
+        try:
+            print("Stopping face processor...")
+            face_processor.stop()
+        except Exception as e:
+            print(f"Error stopping face processor: {e}")
         
-        print("Stopping camera...")
-        camera.stop()
+        try:
+            print("Stopping camera...")
+            camera.stop()
+        except Exception as e:
+            print(f"Error stopping camera: {e}")
         
-        print("Stopping async helper...")
-        async_helper.stop()
+        try:
+            print("Stopping async helper...")
+            async_helper.shutdown(wait=False)  # Don't wait for tasks to complete during emergency shutdown
+        except Exception as e:
+            print(f"Error stopping async helper: {e}")
         
         print("Shutdown complete")
 

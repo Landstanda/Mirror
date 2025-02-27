@@ -382,3 +382,75 @@ def set_process_priorities():
 ```
 
 This implementation guide provides a structured approach to building the MirrorAphrodite system. Follow the phases in sequence, ensuring each component is thoroughly tested before moving to the next phase. Pay special attention to performance considerations and error handling throughout the implementation process. 
+
+
+Bottlenecks and Issues
+  Frame Buffer Copying:
+    - Every frame is copied twice (on add and retrieve)
+    - Unnecessary memory operations slowing down pipeline
+  Low Processing Rates:
+    - Face and display processors locked at 5 FPS
+    - Display updates tied to face detection rate
+    - No need for display to wait for face detection
+  Synchronization Overhead:
+    - Too many locks and thread synchronization points
+    - Excessive thread creation and management
+  Camera Configuration:
+    - Buffer count of 4 might be too high
+    - Noise reduction disabled but other camera optimizations missing
+  Display Processing:
+    - Converting frames to RGBA for overlay is expensive
+    - Software cropping fallback is inefficient
+
+    (remember to remove laden see tracking code from the camera manager: it's 39 lines of code, tracking the latency of every frame and printing it every second.. Lines: 8 - 10, # Performance monitoring 29 - 35, calc & store then def print_performance 143 - 171 minuse 154 & 155)
+
+### Latency Tests
+  Baseline:   
+    - Camera Performance: 31.3 FPS, Latency: 10.3ms
+    - Camera Performance: 30.5 FPS, Latency: 10.7ms
+    - Camera Performance: 29.7 FPS, Latency: 11.2ms
+    - Camera Performance: 29.6 FPS, Latency: 11.0ms
+   Apprearance: Lagging behind, not smooth
+
+  No Double Copy:
+    - Camera Performance: 31.4 FPS, Latency: 10.3ms
+    - Camera Performance: 30.4 FPS, Latency: 10.5ms
+    - Camera Performance: 31.2 FPS, Latency: 10.7ms
+    - Camera Performance: 30.0 FPS, Latency: 11.1ms
+   Appearance: Not really any better noticably
+
+  Display Processor De-couple from feed
+    - Camera Performance: 32.9 FPS, Latency: 10.6ms
+    - Camera Performance: 33.3 FPS, Latency: 10.2ms
+    - Camera Performance: 32.8 FPS, Latency: 10.3ms
+    - Camera Performance: 32.9 FPS, Latency: 10.2ms
+   Appearance: More FPS by a lot. Little more live; still room to grow
+   **PROBLEM** --> Display distorts (narrows) Need ratio fixture
+
+  Fix the distortion problem (which isn't necessarily be part of this optimization process but i think in the process the latency decreased enough that it should be noted.)
+    - Camera Performance: 41.7 FPS, Latency: 7.8ms
+    - Camera Performance: 40.9 FPS, Latency: 8.0ms
+    - Camera Performance: 40.7 FPS, Latency: 8.2ms
+    - Camera Performance: 40.7 FPS, Latency: 7.8ms
+   Appearance: It's going pretty great now, but since we got the less to let's keep optimizing.
+
+   Over synched & threaded
+    - Camera Performance: 41.3 FPS, Latency: 7.8ms
+    - Camera Performance: 41.4 FPS, Latency: 8.0ms
+    - Camera Performance: 41.8 FPS, Latency: 7.7ms
+    - Camera Performance: 41.1 FPS, Latency: 8.0ms
+   Appearance: I think a bit more live!
+  
+  Buffer Reduction
+    - Camera Performance: 26.0 FPS, Latency: 7.6ms
+    - Camera Performance: 29.1 FPS, Latency: 6.5ms
+    - Camera Performance: 28.8 FPS, Latency: 6.5ms
+    - Camera Performance: 28.4 FPS, Latency: 6.3ms
+   Appearance: Mirror like!!
+
+  Color Correction
+    - Camera Performance: 30.1 FPS, Latency: 2.3ms
+    - Camera Performance: 30.1 FPS, Latency: 2.3ms
+    - Camera Performance: 29.9 FPS, Latency: 2.3ms
+    - Camera Performance: 29.7 FPS, Latency: 2.2ms
+   Appearance: Phenomenal..!!

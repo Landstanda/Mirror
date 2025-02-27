@@ -28,32 +28,25 @@ class DisplayProcessor:
         self.SENSOR_WIDTH = 9152   # Full sensor width
         self.SENSOR_HEIGHT = 6944  # Full sensor height
         
-        # Tracking state with spring-damper smoothing
-        self.current_crop = None  # [x, y, size]
-        self.target_crop = None   # [x, y, size]
-        self.velocity = [0, 0, 0]  # Velocity for x, y, and size
-        self.spring_constant = 2.0  # Reduced for smoother motion
-        self.damping = 4.0  # Increased damping to reduce small adjustments
-        self.max_velocity = 100  # Limit maximum velocity to prevent overshooting
-        self.deadzone_factor = 0.2
-        self.size_deadzone_factor = 0.2
-        
-        # Separate face detection from display updates
-        self.last_face_data = None
-        self.last_face_update = 0
-        self.face_data_valid_duration = 0.5  # Consider face data valid for 500ms
+        # Simple position tracking
+        self.current_position = None  # [x, y, size]
+        self.smoothing_factor = 0.08  # Smoothing factor for movement
+        self.movement_threshold = 0.05  # 5% of size for movement threshold
         
         # Frame timing for display
         self.min_display_interval = 0.016  # Target ~60 FPS for display
         self.last_display_update = 0
         
-        # Zoom factors for different landmarks
-        self.zoom_factors = {
-            ZoomLevel.EYES: 1.5,
-            ZoomLevel.LIPS: 1.7,
-            ZoomLevel.FACE: 1.0,
-            ZoomLevel.WIDE: 0.6
+        # Simple fixed ratios relative to face bbox
+        self.zoom_ratios = {
+            ZoomLevel.EYES: 0.4,   # 40% of face bbox - zoomed in
+            ZoomLevel.LIPS: 0.6,   # 60% of face bbox
+            ZoomLevel.FACE: 1.0,   # 100% of face bbox
+            ZoomLevel.WIDE: 1.6    # 160% of face bbox - zoomed out
         }
+        
+        # Eye tracking parameters
+        self.center_threshold = 0.20     # Distance from center to consider a point "centered"
         
     def start(self):
         """Start the display processor"""
@@ -76,20 +69,61 @@ class DisplayProcessor:
         self.current_zoom = level
         
     def _get_landmark_center(self, landmarks: List[Tuple[float, float]], zoom_level: ZoomLevel) -> Tuple[float, float]:
-        """Get the center point for the current zoom level"""
+        """Get center point for the current zoom level using simple midpoint calculations"""
+        # landmarks[0] is left eye, landmarks[1] is right eye, landmarks[2] is nose, landmarks[3] is mouth
         if zoom_level == ZoomLevel.EYES:
-            # Average position between eyes
+            # Simple midpoint between eyes
             return (
                 (landmarks[0][0] + landmarks[1][0]) / 2,
                 (landmarks[0][1] + landmarks[1][1]) / 2
             )
         elif zoom_level == ZoomLevel.LIPS:
-            # Use mouth landmark
+            # Use mouth landmark directly
             return landmarks[3]
         else:  # FACE or WIDE
-            # Use nose landmark for center
+            # Use nose as center point
             return landmarks[2]
             
+    def _get_eye_region_center(self, landmarks: List[Tuple[float, float]]) -> Tuple[float, float]:
+        """Determine the center point for eye tracking with stability logic"""
+        left_eye = landmarks[0]
+        right_eye = landmarks[1]
+        midpoint = (
+            (left_eye[0] + right_eye[0]) / 2,
+            (left_eye[1] + right_eye[1]) / 2
+        )
+        screen_center = (0.5, 0.5)
+        
+        # Calculate distances from center for all three points
+        def dist_from_center(point):
+            return ((point[0] - screen_center[0])**2 + (point[1] - screen_center[1])**2)**0.5
+            
+        left_dist = dist_from_center(left_eye)
+        right_dist = dist_from_center(right_eye)
+        mid_dist = dist_from_center(midpoint)
+        
+        # If any point is near center, use the nearest one
+        if min(left_dist, right_dist, mid_dist) < self.center_threshold:
+            # Return the closest point to center
+            if left_dist < right_dist and left_dist < mid_dist:
+                return left_eye
+            elif right_dist < mid_dist:
+                return right_eye
+            else:
+                return midpoint
+        
+        # If no point is near center, return midpoint to trigger recentering
+        return midpoint
+    
+    def _should_update_crop(self, current_center: Tuple[float, float], target_center: Tuple[float, float]) -> bool:
+        """Determine if the crop should be updated based on movement thresholds"""
+        # Calculate distance between current and target centers
+        distance = ((current_center[0] - target_center[0])**2 + 
+                   (current_center[1] - target_center[1])**2)**0.5
+        
+        # Only update if movement is significant
+        return distance > self.movement_threshold
+        
     def _convert_to_sensor_coordinates(self, x: int, y: int, size: int, frame_width: int, frame_height: int) -> Tuple[int, int, int]:
         """Convert frame coordinates to sensor coordinates maintaining absolute square ratio"""
         # Force square sensor region
@@ -133,24 +167,18 @@ class DisplayProcessor:
         return sensor_x, sensor_y, sensor_size
 
     def _display_loop(self):
-        """Main display loop running at full camera FPS"""
+        """Main display loop running at camera FPS"""
         while self.running:
             current_time = time.monotonic()
             
-            # Check if it's time for a display update
+            # Only update at target frame rate
             if current_time - self.last_display_update >= self.min_display_interval:
                 frame = self.camera_manager.get_latest_frame()
                 if frame is not None:
-                    # Get latest face data if available
+                    # Simple reactive face tracking
                     face_data = self.face_processor.get_current_face_data()
                     if face_data is not None:
-                        self.last_face_data = face_data
-                        self.last_face_update = current_time
-                    
-                    # Use last known face data if it's still valid
-                    if (self.last_face_data is not None and 
-                        current_time - self.last_face_update < self.face_data_valid_duration):
-                        self._update_crop_with_face(self.last_face_data)
+                        self._update_crop_with_face(face_data)
                     
                     # Apply current crop to frame
                     self._apply_current_crop(frame)
@@ -160,7 +188,7 @@ class DisplayProcessor:
             time.sleep(0.001)
 
     def _update_crop_with_face(self, face_data):
-        """Update crop based on face detection data with critically damped smoothing"""
+        """Update crop based on face detection data"""
         if face_data is None:
             return
             
@@ -172,79 +200,48 @@ class DisplayProcessor:
         center_x = int(center_x * w)
         center_y = int(center_y * h)
         
-        # Convert bbox percentages to pixel coordinates first
-        face_x = int(bbox[0] * w)
-        face_y = int(bbox[1] * h)
-        face_w = int(bbox[2] * w)
-        face_h = int(bbox[3] * h)
+        # Calculate new target position
+        face_w = int(bbox[2] * w)  # bbox width in pixels
+        ratio = self.zoom_ratios[self.current_zoom]
+        target_size = int(face_w * ratio)
+        target_size = target_size + (target_size % 2)  # Ensure even size
         
-        # Calculate crop size based on face width with dynamic zoom
-        # As face gets smaller (further away), we crop tighter
-        base_size = face_w  # Use face width as base
-        frame_diagonal = (w * w + h * h) ** 0.5  # Screen diagonal for reference
-        relative_face_size = face_w / frame_diagonal  # How big the face is relative to screen
+        target_position = [
+            int(center_x - target_size / 2),  # x
+            int(center_y - target_size / 2),  # y
+            target_size                        # size
+        ]
         
-        # Dynamic zoom factor: zoom in more when face is smaller
-        dynamic_zoom = max(1.2, 2.0 - relative_face_size * 10)  # Adjust these constants to tune behavior
-        zoom_factor = self.zoom_factors[self.current_zoom] * dynamic_zoom
+        # Initialize or update position with smoothing
+        if self.current_position is None:
+            self.current_position = target_position
+        else:
+            self._smooth_position_update(target_position)
+            
+    def _smooth_position_update(self, target_position):
+        """Simple smooth movement toward target position"""
+        # Calculate movement threshold based on current size
+        threshold = self.current_position[2] * self.movement_threshold
         
-        target_size = int(base_size / zoom_factor)
-        # Ensure even size
-        target_size = target_size + (target_size % 2)
-        
-        # Calculate crop position ensuring perfect square
-        target_x = int(center_x - target_size / 2)
-        target_y = int(center_y - target_size / 2)
-        
-        # Initialize crops and velocity if needed
-        if self.target_crop is None:
-            self.target_crop = [target_x, target_y, target_size]
-            self.velocity = [0, 0, 0]
-        if self.current_crop is None:
-            self.current_crop = self.target_crop.copy()
+        # Update each component (x, y, size)
+        for i in range(3):
+            displacement = target_position[i] - self.current_position[i]
             
-        # Update target crop
-        self.target_crop = [target_x, target_y, target_size]
-        
-        # Apply critically damped smoothing
-        dt = 1/5.0  # Time step (5 FPS)
-        for i in range(3):  # For x, y, and size
-            # Calculate spring force
-            displacement = self.target_crop[i] - self.current_crop[i]
-            spring_force = self.spring_constant * displacement
-            
-            # Apply damping force
-            damping_force = -self.damping * self.velocity[i]
-            
-            # Update velocity with limiting
-            self.velocity[i] += (spring_force + damping_force) * dt
-            
-            # Limit velocity magnitude
-            self.velocity[i] = max(-self.max_velocity, min(self.max_velocity, self.velocity[i]))
-            
-            # If very close to target and moving slowly, just stop
-            if abs(displacement) < 1.0 and abs(self.velocity[i]) < 0.5:
-                self.velocity[i] = 0
-                self.current_crop[i] = self.target_crop[i]
-            else:
-                # Update position
-                self.current_crop[i] += self.velocity[i] * dt
-            
+            # Only update if movement is significant
+            if abs(displacement) > threshold:
+                self.current_position[i] += displacement * self.smoothing_factor
+                
         # Ensure integer coordinates
-        self.current_crop = [int(v) for v in self.current_crop]
-        
-        # Bound check while maintaining square
-        self.current_crop[0] = max(0, min(w - self.current_crop[2], self.current_crop[0]))
-        self.current_crop[1] = max(0, min(h - self.current_crop[2], self.current_crop[1]))
+        self.current_position = [int(round(v)) for v in self.current_position]
 
     def _apply_current_crop(self, frame):
-        """Apply current crop to frame using hardware ScalerCrop when possible"""
-        if self.current_crop is None or frame is None:
+        """Apply current crop to frame using hardware ScalerCrop"""
+        if self.current_position is None or frame is None:
             return
             
         try:
             # Convert to sensor coordinates and update ScalerCrop
-            x, y, size = self.current_crop
+            x, y, size = self.current_position
             sensor_x, sensor_y, sensor_size = self._convert_to_sensor_coordinates(
                 x, y, size, frame.shape[1], frame.shape[0]
             )
@@ -252,6 +249,4 @@ class DisplayProcessor:
                 "ScalerCrop": (sensor_x, sensor_y, sensor_size, sensor_size)
             })
         except Exception as e:
-            # If hardware crop fails, we don't fall back to software crop
-            # This keeps the display pipeline fast
             pass 

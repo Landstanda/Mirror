@@ -2,6 +2,7 @@ import os
 import time
 import threading
 import json
+import queue
 from typing import Optional, Dict, Callable, Deque
 from collections import deque
 from vosk import Model, KaldiRecognizer
@@ -40,12 +41,15 @@ class VoiceController:
         self.command_callbacks = command_callbacks
         self.async_helper = async_helper
         self.running = False
-        self.thread = None
         
         # Performance monitoring
         self.process_times = deque(maxlen=60)  # Store last 60 processing times
         self.last_stats_print = 0
         self.stats_print_interval = 5.0  # Print stats every 5 seconds
+        
+        # Audio processing queue (like in dictation.py)
+        self.audio_queue = queue.Queue()
+        self.process_thread = None
         
         # Initialize audio system
         self._initialize_audio_system()
@@ -74,7 +78,8 @@ class VoiceController:
         print(f"Loading Vosk model from {model_path}...")
         try:
             self.model = Model(model_path)
-            self.recognizer = KaldiRecognizer(self.model, 44100)  # Use 44100Hz directly since we know it works
+            # Use 16kHz like dictation.py instead of 44100Hz
+            self.recognizer = KaldiRecognizer(self.model, 16000)
         except Exception as e:
             raise RuntimeError(f"Failed to initialize Vosk: {e}")
             
@@ -105,18 +110,6 @@ class VoiceController:
                 
             print(f"\nSelected device {input_device_index} for audio input")
             
-            # Configure audio stream with known working parameters
-            self.stream = self.audio.open(
-                format=pyaudio.paInt16,
-                channels=1,
-                rate=44100,
-                input=True,
-                input_device_index=input_device_index,
-                frames_per_buffer=2048,
-                stream_callback=self._audio_callback
-            )
-            print("Successfully opened audio stream at 44100Hz")
-            
         except Exception as e:
             if hasattr(self, 'audio'):
                 self.audio.terminate()
@@ -130,41 +123,56 @@ class VoiceController:
         print("   - 'mirror focus'\n")
         
     def _audio_callback(self, in_data, frame_count, time_info, status):
-        """Handle audio data asynchronously"""
+        """Handle audio data by adding to queue"""
+        if status:
+            print(f"Audio status: {status}")
         if self.running:
-            # Schedule audio processing in async helper
-            self.async_helper.schedule_task(
-                self._process_audio_data,
-                2,  # priority
-                f"audio_{time.monotonic()}",  # task_id
-                in_data  # audio data as positional argument
-            )
+            self.audio_queue.put(bytes(in_data))
         return (None, pyaudio.paContinue)
         
-    def _process_audio_data(self, audio_data):
-        """Process audio data in async helper thread"""
-        try:
-            start_time = time.monotonic()
-            
-            if self.recognizer.AcceptWaveform(audio_data):
-                result = json.loads(self.recognizer.Result())
-                text = result.get("text", "")
+    def _process_audio_thread(self):
+        """Process audio from the queue in a dedicated thread"""
+        while self.running:
+            try:
+                # Get audio data from queue with timeout
+                try:
+                    data = self.audio_queue.get(timeout=0.5)
+                except queue.Empty:
+                    continue
                 
-                if text:
-                    self._process_command(text)
+                start_time = time.monotonic()
+                
+                # Process audio data with error handling
+                try:
+                    if self.recognizer.AcceptWaveform(data):
+                        result = json.loads(self.recognizer.Result())
+                        text = result.get("text", "")
+                        
+                        if text:
+                            self._process_command(text)
+                except Exception as vosk_error:
+                    # Handle Vosk-specific errors without crashing
+                    print(f"Vosk recognition error (continuing): {vosk_error}")
+                    # Reset the recognizer if needed
+                    try:
+                        self.recognizer = KaldiRecognizer(self.model, 16000)
+                        print("Recognizer reset after error")
+                    except:
+                        print("Failed to reset recognizer")
+                
+                # Record processing time
+                process_time = time.monotonic() - start_time
+                self.process_times.append(process_time)
+                
+                # Print stats periodically
+                current_time = time.monotonic()
+                if current_time - self.last_stats_print >= self.stats_print_interval:
+                    self._print_performance_stats()
+                    self.last_stats_print = current_time
                     
-            # Record processing time
-            process_time = time.monotonic() - start_time
-            self.process_times.append(process_time)
-            
-            # Print stats periodically
-            current_time = time.monotonic()
-            if current_time - self.last_stats_print >= self.stats_print_interval:
-                self._print_performance_stats()
-                self.last_stats_print = current_time
-                
-        except Exception as e:
-            print(f"Error processing audio: {e}")
+            except Exception as e:
+                print(f"Error in audio processing thread: {e}")
+                # Don't crash the thread, just continue
             
     def _print_performance_stats(self):
         """Print voice processing performance statistics"""
@@ -201,18 +209,60 @@ class VoiceController:
         if not self.running:
             print("Starting voice controller...")
             self.running = True
-            self.stream.start_stream()
+            
+            # Start audio stream with larger buffer like dictation.py
+            try:
+                self.stream = self.audio.open(
+                    format=pyaudio.paInt16,
+                    channels=1,
+                    rate=16000,  # 16kHz like dictation.py
+                    input=True,
+                    frames_per_buffer=8000,  # Larger buffer like dictation.py
+                    stream_callback=self._audio_callback
+                )
+                self.stream.start_stream()
+                print("Audio stream started")
+            except Exception as e:
+                print(f"Error starting audio stream: {e}")
+                self.running = False
+                return
+            
+            # Start processing thread
+            self.process_thread = threading.Thread(target=self._process_audio_thread, daemon=True)
+            self.process_thread.start()
+            print("Voice processing thread started")
             
     def stop(self):
         """Stop voice recognition and cleanup"""
         print("Stopping voice controller...")
         self.running = False
         
-        if hasattr(self, 'stream'):
-            self.stream.stop_stream()
-            self.stream.close()
+        # Wait for processing thread to finish
+        if hasattr(self, 'process_thread') and self.process_thread and self.process_thread.is_alive():
+            try:
+                self.process_thread.join(timeout=1.0)
+            except Exception as e:
+                print(f"Warning: Could not join processing thread: {e}")
+        
+        # Clean up audio resources
+        try:
+            if hasattr(self, 'stream'):
+                if self.stream.is_active():
+                    try:
+                        self.stream.stop_stream()
+                    except Exception as e:
+                        print(f"Warning: Error stopping stream: {e}")
+                try:
+                    self.stream.close()
+                except Exception as e:
+                    print(f"Warning: Error closing stream: {e}")
+        except Exception as e:
+            print(f"Error cleaning up stream: {e}")
             
-        if hasattr(self, 'audio'):
-            self.audio.terminate()
+        try:
+            if hasattr(self, 'audio'):
+                self.audio.terminate()
+        except Exception as e:
+            print(f"Warning: Error terminating PyAudio: {e}")
             
         print("Voice controller stopped") 

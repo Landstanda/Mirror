@@ -33,14 +33,18 @@ class DistanceSensor:
         
         # Distance and focus parameters
         self.current_distance = 0.0
-        self.min_distance = 20.0  # cm
-        self.max_distance = 150.0  # cm
-        self.sample_interval = 0.2  # 200ms = 5Hz
+        self.min_distance = 30.0  # cm - adjusted to match calibration range
+        self.max_distance = 90.0  # cm - adjusted to match calibration range
+        self.sample_interval = 0.1  # 100ms = 10Hz - more responsive
+        
+        # Focus smoothing
+        self.focus_history = deque(maxlen=5)  # Store last 5 focus values
+        self.focus_smoothing_enabled = True
         
         # Performance monitoring
         self.measure_times = deque(maxlen=60)  # Store last 60 measurements
         self.last_stats_print = 0
-        self.stats_print_interval = 7.0  # Print stats every 7 seconds
+        self.stats_print_interval = 30.0  # Print stats every 30 seconds (increased from 10)
         
         # Focus mapping parameters (based on camera characteristics)
         self.distance_focus_map = {
@@ -103,20 +107,41 @@ class DistanceSensor:
         
         # Handle out of range values
         if distance <= distances[0]:
-            return self.distance_focus_map[distances[0]]
-        if distance >= distances[-1]:
-            return self.distance_focus_map[distances[-1]]
+            raw_focus = self.distance_focus_map[distances[0]]
+        elif distance >= distances[-1]:
+            raw_focus = self.distance_focus_map[distances[-1]]
+        else:
+            # Find surrounding points for interpolation
+            for i in range(len(distances) - 1):
+                d1, d2 = distances[i], distances[i + 1]
+                if d1 <= distance <= d2:
+                    f1 = self.distance_focus_map[d1]
+                    f2 = self.distance_focus_map[d2]
+                    # Linear interpolation
+                    raw_focus = f1 + (f2 - f1) * (distance - d1) / (d2 - d1)
+                    break
+            else:
+                raw_focus = self.distance_focus_map[distances[0]]  # Fallback
         
-        # Find surrounding points for interpolation
-        for i in range(len(distances) - 1):
-            d1, d2 = distances[i], distances[i + 1]
-            if d1 <= distance <= d2:
-                f1 = self.distance_focus_map[d1]
-                f2 = self.distance_focus_map[d2]
-                # Linear interpolation
-                return f1 + (f2 - f1) * (distance - d1) / (d2 - d1)
+        # Apply smoothing if enabled
+        if self.focus_smoothing_enabled:
+            # Add current focus to history
+            self.focus_history.append(raw_focus)
+            
+            # Calculate weighted average (more weight to recent values)
+            if len(self.focus_history) > 0:
+                weights = [0.1, 0.15, 0.2, 0.25, 0.3]  # More weight to recent values
+                weights = weights[-len(self.focus_history):]  # Adjust weights to match history length
+                
+                # Normalize weights
+                weight_sum = sum(weights)
+                weights = [w / weight_sum for w in weights]
+                
+                # Calculate weighted average
+                smoothed_focus = sum(f * w for f, w in zip(self.focus_history, weights))
+                return smoothed_focus
         
-        return self.distance_focus_map[distances[0]]  # Fallback
+        return raw_focus
         
     def _sensor_loop(self):
         """Main sensor reading loop"""
@@ -162,9 +187,26 @@ class DistanceSensor:
             avg_time = sum(self.measure_times) / len(self.measure_times) * 1000
             current_distance = self.get_current_distance()
             current_focus = self.get_current_focus()
+            
+            # Calculate raw focus for comparison
+            raw_focus = None
+            distances = sorted(self.distance_focus_map.keys())
+            if current_distance <= distances[0]:
+                raw_focus = self.distance_focus_map[distances[0]]
+            elif current_distance >= distances[-1]:
+                raw_focus = self.distance_focus_map[distances[-1]]
+            else:
+                for i in range(len(distances) - 1):
+                    d1, d2 = distances[i], distances[i + 1]
+                    if d1 <= current_distance <= d2:
+                        f1 = self.distance_focus_map[d1]
+                        f2 = self.distance_focus_map[d2]
+                        raw_focus = f1 + (f2 - f1) * (current_distance - d1) / (d2 - d1)
+                        break
+            
             print(f"\n=== Distance Sensor Status ===")
             print(f"Distance: {current_distance:.1f}cm")
-            print(f"Focus Setting: {current_focus:.2f}")
+            print(f"Focus Setting: {current_focus:.2f}" + (f" (Raw: {raw_focus:.2f})" if raw_focus is not None else ""))
             print(f"Avg measurement time: {avg_time:.1f}ms")
             print("===========================\n")
             

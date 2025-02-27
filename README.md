@@ -1,6 +1,6 @@
 # MirrorAphrodite
 
-A smart mirror application for Raspberry Pi that uses the Arducam 64MP Hawkeyes camera. Features face tracking, voice commands, and automatic focus adjustment.
+A smart mirror application for Raspberry Pi that uses the Arducam 64MP Hawkeyes camera and a distance sensor and a round monitor to at as a next generation digital vanity mirror. Features face tracking, voice commands, and automatic focus adjustment.
 
 ## Core Components Overview
 
