@@ -36,6 +36,8 @@ class DisplayProcessor:
         # Frame timing for display
         self.min_display_interval = 0.016  # Target ~60 FPS for display
         self.last_display_update = 0
+        self.last_debug_print = 0
+        self.debug_print_interval = 1.0  # Print debug info every second
         
         # Simple fixed ratios relative to face bbox
         self.zoom_ratios = {
@@ -148,9 +150,25 @@ class DisplayProcessor:
             extra_height = self.SENSOR_HEIGHT - sensor_dim
             sensor_y += int(extra_height / 2)
         
+        # Debug logging for sensor coordinate conversion
+        current_time = time.monotonic()
+        if current_time - self.last_debug_print >= self.debug_print_interval:
+            print("\nSensor Coordinate Conversion Debug:")
+            print(f"Input frame coords: x={x}, y={y}, size={size}")
+            print(f"Frame dimensions: {frame_width}x{frame_height}")
+            print(f"Sensor dimensions: {self.SENSOR_WIDTH}x{self.SENSOR_HEIGHT}")
+            print(f"Frame scale: {frame_scale}")
+            print(f"Pre-bounds sensor coords: x={sensor_x}, y={sensor_y}, size={sensor_size}")
+        
         # Final bounds check
         sensor_x = max(0, min(self.SENSOR_WIDTH - sensor_size, sensor_x))
         sensor_y = max(0, min(self.SENSOR_HEIGHT - sensor_size, sensor_y))
+
+        # Debug logging for final bounds-checked coordinates
+        if current_time - self.last_debug_print >= self.debug_print_interval:
+            print(f"Final sensor coords: x={sensor_x}, y={sensor_y}, size={sensor_size}")
+            print(f"Crop region: {sensor_x}:{sensor_x+sensor_size}, {sensor_y}:{sensor_y+sensor_size}")
+            self.last_debug_print = current_time
         
         return sensor_x, sensor_y, sensor_size
 
@@ -199,6 +217,18 @@ class DisplayProcessor:
             int(center_y - target_size / 2),  # y
             target_size                        # size
         ]
+
+        # Debug logging for target position calculation
+        current_time = time.monotonic()
+        if current_time - self.last_debug_print >= self.debug_print_interval:
+            print("\nFace Detection Debug:")
+            print(f"Frame size: {w}x{h}")
+            print(f"Face bbox (normalized): {bbox}")
+            print(f"Center point: ({center_x}, {center_y})")
+            print(f"Face width: {face_w}px")
+            print(f"Zoom level: {self.current_zoom.name}, ratio: {ratio}")
+            print(f"Target position: x={target_position[0]}, y={target_position[1]}, size={target_position[2]}")
+            self.last_debug_print = current_time
         
         # Initialize or update position with smoothing
         if self.current_position is None:
@@ -222,6 +252,14 @@ class DisplayProcessor:
         # Ensure integer coordinates
         self.current_position = [int(round(v)) for v in self.current_position]
 
+        # Debug logging for smoothed position
+        current_time = time.monotonic()
+        if current_time - self.last_debug_print >= self.debug_print_interval:
+            print("\nSmoothing Debug:")
+            print(f"Target position: {target_position}")
+            print(f"Current position: {self.current_position}")
+            print(f"Movement threshold: {threshold}")
+
     def _apply_current_crop(self, frame):
         """Apply current crop to frame using hardware ScalerCrop"""
         if self.current_position is None or frame is None:
@@ -233,8 +271,16 @@ class DisplayProcessor:
             sensor_x, sensor_y, sensor_size = self._convert_to_sensor_coordinates(
                 x, y, size, frame.shape[1], frame.shape[0]
             )
+            
+            # Debug logging for ScalerCrop
+            current_time = time.monotonic()
+            if current_time - self.last_debug_print >= self.debug_print_interval:
+                print("\nScalerCrop Debug:")
+                print(f"Setting ScalerCrop: ({sensor_x}, {sensor_y}, {sensor_size}, {sensor_size})")
+            
             self.camera_manager.picam2.set_controls({
                 "ScalerCrop": (sensor_x, sensor_y, sensor_size, sensor_size)
             })
         except Exception as e:
+            print(f"ERROR in _apply_current_crop: {e}")
             pass 

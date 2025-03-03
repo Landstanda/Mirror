@@ -39,31 +39,54 @@ class CameraManager:
         """Configure camera with optimized low-latency settings"""
         print("Configuring camera for low latency...")
         
-        # Create video configuration optimized for low latency
-        video_config = self.picam2.create_video_configuration(
-            # Main stream configuration
-            main={"size": (1100, 1100), "format": "RGB888"},  # Direct RGB format
-            transform=Transform(hflip=False, vflip=True),
-            buffer_count=2,  # Minimum for stable operation
-            queue=True,
-            controls={
-                "NoiseReductionMode": controls.draft.NoiseReductionModeEnum.Off,
-                "FrameRate": 60.0
-            },
-            encode="main"  # Direct sensor-to-memory path
-        )
-        
-        print("Setting camera configuration...")
         try:
+            # Log available camera modes
+            print("\nAvailable Camera Modes:")
+            for i, mode in enumerate(self.picam2.sensor_modes):
+                print(f"Mode {i}:")
+                print(f"  Size: {mode['size']}")
+                print(f"  Format: {mode['format']}")
+                if 'fps' in mode:
+                    print(f"  FPS: {mode['fps']}")
+                    
+            # Create video configuration optimized for low latency
+            video_config = self.picam2.create_video_configuration(
+                # Main stream configuration
+                main={"size": (1100, 1100), "format": "RGB888"},  # Keep display size square
+                sensor={"output_size": (2312, 1736)},  # Use Mode 2 resolution
+                transform=Transform(hflip=False, vflip=True),
+                buffer_count=3,  # Increased for smoother operation at higher res
+                queue=True,
+                controls={
+                    "NoiseReductionMode": controls.draft.NoiseReductionModeEnum.Off,
+                    "FrameRate": 30.0  # Match Mode 2's FPS
+                },
+                encode="main"  # Direct sensor-to-memory path
+            )
+            
+            print("\nRequested Video Configuration:")
+            print(f"Main stream size: {video_config['main']['size']}")
+            print(f"Sensor size: {video_config['sensor']['output_size']}")
+            print(f"Format: {video_config['main']['format']}")
+            print(f"Buffer count: {video_config['buffer_count']}")
+            print(f"Controls: {video_config['controls']}")
+            
+            print("\nSetting camera configuration...")
             self.picam2.configure(video_config)
             print("Camera configuration applied")
+            
+            # Log actual running configuration
+            print("\nActual Running Configuration:")
+            print(f"Camera Properties: {self.picam2.camera_properties}")
+            print(f"Camera Controls: {self.picam2.camera_controls}")
             
             # Enable zero-copy operation where possible
             self.picam2.options["enable_raw"] = True
             self.picam2.options["use_dma"] = True  # Enable DMA for frame transfer
-            self.picam2.options["buffer_count"] = 2  # Ensure buffer count matches
+            self.picam2.options["buffer_count"] = 3  # Match the increased buffer count
             self.picam2.options["callback_format"] = "RGB888"  # Match main format
-            print("Camera options configured")
+            print("\nCamera options configured:")
+            print(f"Options: {self.picam2.options}")
             
         except Exception as e:
             print(f"ERROR configuring camera: {e}")
@@ -76,7 +99,7 @@ class CameraManager:
                 "AfMode": 0,          # Manual focus
                 "AfSpeed": 1,         # Fast AF when manual adjustment needed
                 "LensPosition": 10.0,  # Initial focus position
-                "FrameDurationLimits": (16666, 16666),  # Target 60fps
+                "FrameDurationLimits": (33333, 33333),  # Target 30fps (1/30 sec = 33333 μs)
                 "NoiseReductionMode": 0  # Disable noise reduction
             })
             print("Camera controls set successfully")
@@ -142,6 +165,15 @@ class CameraManager:
             frame = request.make_array("main")
             if frame is None:
                 return
+                
+            # Log frame properties periodically
+            current_time = time.monotonic()
+            if current_time - self.last_fps_print >= self.fps_print_interval:
+                print(f"\nFrame Properties:")
+                print(f"Shape: {frame.shape}")
+                print(f"Data type: {frame.dtype}")
+                if hasattr(request, 'metadata'):
+                    print(f"Metadata: {request.metadata}")
                 
             # Process frame directly
             processed_frame = self._process_frame(frame)
