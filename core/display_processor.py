@@ -24,6 +24,11 @@ class DisplayProcessor:
         self.running = False
         self.thread = None
         
+        # Get reference to ScalerCropController from camera_manager
+        self.scaler_crop_controller = None
+        if hasattr(camera_manager, 'scaler_crop_controller'):
+            self.scaler_crop_controller = camera_manager.scaler_crop_controller
+        
         # Camera sensor constants
         self.SENSOR_WIDTH = 9152   # Full sensor width
         self.SENSOR_HEIGHT = 6944  # Full sensor height
@@ -41,7 +46,7 @@ class DisplayProcessor:
         
         # Simple fixed ratios relative to face bbox
         self.zoom_ratios = {
-            ZoomLevel.EYES: 0.4,   # 40% of face bbox - zoomed in
+            ZoomLevel.EYES: 0.5,   # 40% of face bbox - zoomed in
             ZoomLevel.LIPS: 0.6,   # 60% of face bbox
             ZoomLevel.FACE: 1.0,   # 100% of face bbox
             ZoomLevel.WIDE: 1.6    # 160% of face bbox - zoomed out
@@ -49,6 +54,9 @@ class DisplayProcessor:
         
         # Eye tracking parameters
         self.center_threshold = 0.20     # Distance from center to consider a point "centered"
+        
+        # In __init__, add this new attribute:
+        self.fixed_eye_zoom_size = None
         
     def start(self):
         """Start the display processor"""
@@ -67,8 +75,29 @@ class DisplayProcessor:
             self.thread.join(timeout=1.0)
             
     def set_zoom_level(self, level: ZoomLevel):
-        """Change the zoom level"""
+        """Change the zoom level and coordinate with ScalerCropController"""
+        print(f"\nDEBUG: DisplayProcessor.set_zoom_level called with {level}")
+        print(f"DEBUG: Current zoom level before change: {self.current_zoom}")
+        
         self.current_zoom = level
+        if level != ZoomLevel.EYES:
+            self.fixed_eye_zoom_size = None
+            
+        # Coordinate with ScalerCropController if available
+        if self.scaler_crop_controller:
+            print("DEBUG: ScalerCropController found, updating zoom level")
+            self.scaler_crop_controller.set_zoom_level(level)
+            # Force an immediate crop update if we have face data
+            face_data = self.face_processor.get_current_face_data()
+            if face_data:
+                print("DEBUG: Face data available, forcing crop update")
+                self.scaler_crop_controller.update_target_crop(face_data)
+            else:
+                print("DEBUG: No face data available for crop update")
+        else:
+            print("DEBUG: No ScalerCropController found")
+            
+        print(f"DEBUG: Zoom level change complete. New level: {self.current_zoom}")
         
     def _get_landmark_center(self, landmarks: List[Tuple[float, float]], zoom_level: ZoomLevel) -> Tuple[float, float]:
         """Get center point for the current zoom level using simple midpoint calculations"""
@@ -179,16 +208,14 @@ class DisplayProcessor:
             
             # Only update at target frame rate
             if current_time - self.last_display_update >= self.min_display_interval:
-                frame = self.camera_manager.get_latest_frame()
+                frame = self.camera_manager.get_latest_frame_direct()  # Use direct frame access
                 if frame is not None:
-                    # Simple reactive face tracking
-                    face_data = self.face_processor.get_current_face_data()
-                    if face_data is not None:
-                        self._update_crop_with_face(face_data)
-                    
-                    # Apply current crop to frame
-                    self._apply_current_crop(frame)
-                    self.last_display_update = current_time
+                    # Apply tighter software crop for display
+                    display_frame = self._software_crop_for_display(frame)
+                    # Display the frame directly
+                    self.display_frame(display_frame)
+
+                self.last_display_update = current_time
             
             # Small sleep to prevent CPU thrashing
             time.sleep(0.001)
@@ -201,36 +228,32 @@ class DisplayProcessor:
         h, w = self.camera_manager.get_latest_frame().shape[:2]
         bbox = face_data.bbox
         
-        # Get center point based on current zoom level
-        center_x, center_y = self._get_landmark_center(face_data.landmarks, self.current_zoom)
+        conservative_zoom_ratio = 1.2
+        center_x, center_y = self._get_landmark_center(face_data.landmarks, ZoomLevel.FACE)
         center_x = int(center_x * w)
         center_y = int(center_y * h)
         
-        # Calculate new target position
-        face_w = int(bbox[2] * w)  # bbox width in pixels
-        ratio = self.zoom_ratios[self.current_zoom]
-        target_size = int(face_w * ratio)
-        target_size = target_size + (target_size % 2)  # Ensure even size
+        face_w = int(bbox[2] * w)
+        target_size = int(face_w * conservative_zoom_ratio)
+        target_size = target_size + (target_size % 2)
         
         target_position = [
-            int(center_x - target_size / 2),  # x
-            int(center_y - target_size / 2),  # y
-            target_size                        # size
+            int(center_x - target_size / 2),
+            int(center_y - target_size / 2),
+            target_size
         ]
 
-        # Debug logging for target position calculation
         current_time = time.monotonic()
         if current_time - self.last_debug_print >= self.debug_print_interval:
-            print("\nFace Detection Debug:")
-            print(f"Frame size: {w}x{h}")
+            print("\nEnhanced Debug Info:")
             print(f"Face bbox (normalized): {bbox}")
-            print(f"Center point: ({center_x}, {center_y})")
-            print(f"Face width: {face_w}px")
-            print(f"Zoom level: {self.current_zoom.name}, ratio: {ratio}")
-            print(f"Target position: x={target_position[0]}, y={target_position[1]}, size={target_position[2]}")
+            print(f"Face bbox (pixels): width={face_w}px")
+            print(f"Sensor crop target size: {target_size}px")
+            print(f"Sensor crop position: {target_position}")
+            software_crop_size = int(face_w * self.zoom_ratios[self.current_zoom])
+            print(f"Software crop target size: {software_crop_size}px")
             self.last_debug_print = current_time
-        
-        # Initialize or update position with smoothing
+
         if self.current_position is None:
             self.current_position = target_position
         else:
@@ -284,3 +307,65 @@ class DisplayProcessor:
         except Exception as e:
             print(f"ERROR in _apply_current_crop: {e}")
             pass 
+
+    def _software_crop_for_display(self, frame):
+        """Apply software cropping based on zoom level for display purposes"""
+        if frame is None:
+            return frame
+
+        try:
+            h, w = frame.shape[:2]
+            face_data = self.face_processor.get_current_face_data()
+            
+            if face_data is None:
+                print("DEBUG: No face data available for software crop")
+                return frame
+                
+            bbox = face_data.bbox
+            print(f"\nDEBUG: Software crop - Current zoom level: {self.current_zoom}")
+            print(f"DEBUG: Face bbox: {bbox}")
+            print(f"DEBUG: Zoom ratio for current level: {self.zoom_ratios[self.current_zoom]}")
+
+            # Get center point based on current zoom level
+            center_x, center_y = self._get_landmark_center(face_data.landmarks, self.current_zoom)
+            center_x = int(center_x * w)
+            center_y = int(center_y * h)
+            print(f"DEBUG: Crop center point: ({center_x}, {center_y})")
+
+            # Calculate target size based on zoom ratios
+            face_w = int(bbox[2] * w)
+            target_size = int(face_w * self.zoom_ratios[self.current_zoom])
+            target_size = target_size + (target_size % 2)  # Ensure even size
+            print(f"DEBUG: Target crop size: {target_size}")
+
+            # Calculate crop coordinates ensuring they stay within frame boundaries
+            x1 = max(0, center_x - target_size // 2)
+            y1 = max(0, center_y - target_size // 2)
+            x2 = min(w, x1 + target_size)
+            y2 = min(h, y1 + target_size)
+            print(f"DEBUG: Crop coordinates: ({x1}, {y1}) to ({x2}, {y2})")
+
+            # Adjust coordinates if crop goes beyond frame boundaries
+            if x2 - x1 < target_size:
+                x1 = max(0, x2 - target_size)
+            if y2 - y1 < target_size:
+                y1 = max(0, y2 - target_size)
+
+            cropped_frame = frame[y1:y2, x1:x2]
+            resized_frame = cv2.resize(cropped_frame, (w, h), interpolation=cv2.INTER_LINEAR)
+            print(f"DEBUG: Final crop shape: {cropped_frame.shape} -> {resized_frame.shape}")
+            
+            return resized_frame
+            
+        except Exception as e:
+            print(f"ERROR in software crop: {e}")
+            return frame
+
+    def display_frame(self, frame):
+        """Display the frame using the camera's preview"""
+        if frame is not None:
+            try:
+                # Update the preview with the new frame
+                self.camera_manager.picam2.set_preview(frame)
+            except Exception as e:
+                print(f"Error displaying frame: {e}") 

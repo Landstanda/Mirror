@@ -222,3 +222,7 @@ class CameraManager:
         """Set the zoom level of the camera"""
         self.current_zoom = zoom_level
         # TODO: Implement actual zoom logic based on zoom_level 
+
+    def get_latest_frame_direct(self):
+        """Provide direct access to the latest frame from the camera."""
+        return self.picam2.capture_frame()  # Assuming capture_frame() is a method that captures and returns the latest frame directly 

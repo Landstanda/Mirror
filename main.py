@@ -9,6 +9,7 @@ from core.display_processor import DisplayProcessor
 from core.voice_controller import VoiceController, VoiceCommand
 from core.distance_sensor import DistanceSensor
 from core.async_helper import AsyncHelper
+from core.scaler_crop_controller import ScalerCropController
 
 # Set up Qt environment variables
 os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = "/usr/lib/aarch64-linux-gnu/qt5/plugins/platforms"
@@ -47,11 +48,14 @@ def main():
     print("Initializing Mirror System...")
     
     # Initialize shared components
-    async_helper = AsyncHelper(max_workers=6)  # Increased workers for all components
+    async_helper = AsyncHelper(max_workers=6)
     
     # Initialize core components
     camera = CameraManager()
-    face_processor = CameraFaceProcessor(camera)
+    scaler_crop_controller = ScalerCropController(camera)
+    # Attach scaler_crop_controller to camera_manager for coordination
+    camera.scaler_crop_controller = scaler_crop_controller
+    face_processor = CameraFaceProcessor(camera, scaler_crop_controller)
     display_processor = DisplayProcessor(camera, face_processor)
     
     # Initialize distance sensor (GPIO pins 23 and 24)
@@ -102,6 +106,9 @@ def main():
         print("Starting camera...")
         camera.start()
         time.sleep(1)  # Wait for camera initialization
+        
+        print("Starting ScalerCrop controller...")
+        scaler_crop_controller.start()
         
         print("Starting face processor...")
         face_processor.start()

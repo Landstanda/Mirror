@@ -195,11 +195,16 @@ class VoiceController:
                 callback = self.command_callbacks.get(command)
                 if callback:
                     print(f"🎤 Executing command: {command.name}")
-                    self.async_helper.schedule_task(
-                        callback,
-                        priority=1,  # Lower priority for command execution
-                        task_id=f"cmd_{command.name}_{time.monotonic()}"
-                    )
+                    print(f"DEBUG: Command callback type: {type(callback)}")
+                    try:
+                        self.async_helper.schedule_task(
+                            callback,
+                            priority=1,  # Lower priority for command execution
+                            task_id=f"cmd_{command.name}_{time.monotonic()}"
+                        )
+                        print(f"DEBUG: Successfully scheduled {command.name} command")
+                    except Exception as e:
+                        print(f"ERROR scheduling command: {e}")
                     return  # Exit after first command match
                     
         print("❌ No command recognized")  # Print when no command matches

@@ -67,3 +67,12 @@ class FrameBuffer:
     def size(self) -> int:
         """Get approximate size without locking"""
         return self._frames.qsize() 
+        
+    def get_size(self) -> int:
+        """Get approximate size without locking"""
+        return self.size
+        
+    @property
+    def buffer_size(self) -> int:
+        """Get maximum buffer size"""
+        return self._frames.maxsize 

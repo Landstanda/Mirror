@@ -454,3 +454,26 @@ Bottlenecks and Issues
     - Camera Performance: 29.9 FPS, Latency: 2.3ms
     - Camera Performance: 29.7 FPS, Latency: 2.2ms
    Appearance: Phenomenal..!!
+
+To-Do List
+1. Simplify Smoothing System
+  - Remove spring-damper physics simulation
+  - Implement simple linear interpolation between positions
+  - Remove velocity and acceleration tracking
+2. Remove Motion Prediction
+  - Remove predictive motion calculations
+  - Implement simple reactive tracking
+  - Use basic movement thresholds
+3. Simplify Zoom Levels
+  - Remove complex zoom factor calculations
+  - Implement fixed ratios based on face bbox
+  - Simplify zoom level state management
+4. Simplify Stability Logic
+  - Implement single, simple threshold for movement
+  - Remove complex distance calculations
+  - Create straightforward stability check
+5. Simplify Eye Centering
+  - Always use midpoint between eyes
+  - Remove complex eye-selection logic
+  - Implement simple center point calculation
+6

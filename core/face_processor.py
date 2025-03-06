@@ -190,12 +190,22 @@ class FaceProcessor:
             # Small sleep to prevent CPU thrashing
             time.sleep(0.001)
 
+    def update_scaler_crop(self, face_data):
+        """Update ScalerCrop settings based on face data."""
+        if face_data:
+            # Calculate new ScalerCrop settings based on face_data
+            # This is a placeholder for actual calculation logic
+            new_scaler_crop_settings = self.calculate_scaler_crop_settings(face_data)
+            # Update the camera's ScalerCrop settings
+            self.camera_manager.update_scaler_crop_settings(new_scaler_crop_settings)
+
 class CameraFaceProcessor(FaceProcessor):
     """Face processor that connects to our CameraManager"""
     
-    def __init__(self, camera_manager, min_detection_confidence=0.3):
+    def __init__(self, camera_manager, scaler_crop_controller, min_detection_confidence=0.3):
         super().__init__(min_detection_confidence)
         self.camera_manager = camera_manager
+        self.scaler_crop_controller = scaler_crop_controller
         
     def _processing_loop(self):
         """Main processing loop running in separate thread"""
@@ -216,6 +226,8 @@ class CameraFaceProcessor(FaceProcessor):
                 face_data = self.process_frame(frame)
                 if face_data:
                     self._smooth_face_data(face_data)
+                    # Update ScalerCropController with new face data
+                    self.scaler_crop_controller.update_target_crop(face_data)
                 last_process_time = current_time
             
             # Small sleep to prevent CPU thrashing
