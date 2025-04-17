@@ -49,7 +49,13 @@ class ScalerCropController:
     def set_zoom_level(self, zoom_level: ZoomLevel):
         """Update zoom level for hardware crop"""
         print(f"\nChanging zoom to: {zoom_level}")
-        self.current_zoom = zoom_level
+        # Use lock to ensure atomicity of zoom level change and crop reset
+        with self.lock:
+            self.current_zoom = zoom_level
+            # Reset current_crop to None. This forces _smooth_crop_update
+            # to immediately adopt the new target_crop (reflecting the new zoom)
+            # on the next update cycle, bypassing the dead zone check for the transition.
+            self.current_crop = None
         
     def update_target_crop(self, face_data) -> None:
         """Update the target crop based on face detection data"""
