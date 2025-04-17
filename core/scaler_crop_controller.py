@@ -18,9 +18,10 @@ class ScalerCropController:
         # Crop settings
         self.current_crop = None  # (x, y, width, height)
         self.target_crop = None
-        self.smoothing_factor = 0.15  # Reduced from 0.3 for smoother transitions
-        self.min_update_interval = 0.2  # 5 FPS updates
+        self.smoothing_factor = 0.15  # Reduced from 0.3 for smoother transitions. NOTE: May need further tuning with faster update interval.
+        self.min_update_interval = 0.0333  # Target 30 FPS updates (1 / 30) - Changed from 0.2 (5 FPS)
         self.last_update_time = 0
+        self.movement_threshold_ratio = 0.10 # Only start panning if target center moves > 10% of current crop width/height
         
         # Hardware zoom ratios for different zoom levels (relative to face size)
         self.hardware_zoom_ratios = {
@@ -73,24 +74,42 @@ class ScalerCropController:
             self.target_crop = (x, y, size, size)
             
     def _smooth_crop_update(self) -> Optional[Tuple[float, float, float, float]]:
-        """Calculate smoothed crop settings"""
+        """Calculate smoothed crop settings, applying a dead zone for stability."""
         if self.target_crop is None:
             return None
             
         if self.current_crop is None:
+            # First update, set current directly to target
             self.current_crop = self.target_crop
             return self.current_crop
-            
-        # Smooth transition to target
-        new_crop = []
-        for i in range(4):
-            current = self.current_crop[i]
-            target = self.target_crop[i]
-            smoothed = current + (target - current) * self.smoothing_factor
-            new_crop.append(smoothed)
-            
-        self.current_crop = tuple(new_crop)
-        return self.current_crop
+
+        # Calculate centers
+        current_center_x = self.current_crop[0] + self.current_crop[2] / 2
+        current_center_y = self.current_crop[1] + self.current_crop[3] / 2
+        target_center_x = self.target_crop[0] + self.target_crop[2] / 2
+        target_center_y = self.target_crop[1] + self.target_crop[3] / 2
+
+        # Calculate distance between centers
+        delta_x = target_center_x - current_center_x
+        delta_y = target_center_y - current_center_y
+        distance = (delta_x**2 + delta_y**2)**0.5
+
+        # Calculate movement threshold based on current crop size (using width, assuming square)
+        threshold_distance = self.current_crop[2] * self.movement_threshold_ratio
+        
+        # Only apply smoothing if movement exceeds threshold
+        if distance > threshold_distance:
+            # Smooth transition to target
+            new_crop = []
+            for i in range(4):
+                current = self.current_crop[i]
+                target = self.target_crop[i]
+                smoothed = current + (target - current) * self.smoothing_factor
+                new_crop.append(smoothed)
+            self.current_crop = tuple(new_crop)
+        # Else: self.current_crop remains unchanged, creating the dead zone
+
+        return self.current_crop # Return the (potentially unchanged) current crop
         
     def _update_loop(self):
         """Main loop for updating ScalerCrop settings"""
